@@ -1,9 +1,2 @@
-# FFUUUCCCKKKKK
-
-# claim order
-
-# wat they order
-
-# make
-
-# hand over
+# the main script to run all 4 other
+# py scripts (ordertracker, coffee, [syrup], [ml])

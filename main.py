@@ -1,29 +1,21 @@
-import subprocess
-import sys
-import time
-
+import multiprocessing
 import keyboard
+import coffee
+import cup
+import order
 
-# add "syrup.py" / "ml.py" here later
-SCRIPTS = ["order.py", "coffee.py"]
 
-
-def main():
-    procs = [subprocess.Popen([sys.executable, script]) for script in SCRIPTS]
-    try:
-        # run until every script exits (coffee quits on F7, order on Ctrl+C / window close)
-        while any(p.poll() is None for p in procs):
-            time.sleep(0.5)
-    except KeyboardInterrupt:
-        pass
-    finally:
-        for p in procs:
-            if p.poll() is None:
-                p.terminate()
-        for p in procs:
-            p.wait()
-        keyboard.release("space")  # a killed coffee.py can't release the key itself
+def _run_coffee():
+    coffee.main()
 
 
 if __name__ == "__main__":
-    main()
+    multiprocessing.freeze_support()
+    coffee_proc = multiprocessing.Process(target=_run_coffee, daemon=True)
+    coffee_proc.start()
+    try:
+        order.main(on_tick=cup.tick)   # owns the tkinter mainloop; calls cup.tick every poll
+    finally:
+        if coffee_proc.is_alive():
+            coffee_proc.terminate()
+        keyboard.release("space")

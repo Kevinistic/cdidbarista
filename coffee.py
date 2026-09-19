@@ -15,6 +15,12 @@ try:
 except Exception:
     ctypes.windll.user32.SetProcessDPIAware()
 
+# Set high-precision 1ms timer resolution on Windows for precise 5ms sleep & velocity tracking
+try:
+    ctypes.windll.winmm.timeBeginPeriod(1)
+except Exception:
+    pass
+
 # ---------------- Studio layout (from your data) ----------------
 FRAME_POS_Y = 0.9                      # frame: anchor (0.5, 1), position (0.5, 0.9)
 FRAME_W, FRAME_H = 430, 128
@@ -30,10 +36,10 @@ ORANGE_LO = (0, 100, 220)              # BGR range of the cup's orange label
 ORANGE_HI = (70, 170, 255)
 MIN_ORANGE = 40                        # min orange px = MIN_ORANGE * scale^2
 GRADIENT_MIN = 50                      # min (left - right) brightness of the track
-LOST_FRAMES = 15                       # frames without needle -> round over
+LOST_FRAMES = 60                       # frames without needle -> round over (increased to allow out-of-zone recovery)
 LOOKAHEAD = 0.08                       # seconds of velocity prediction
 DEADBAND = 0.015                       # fraction of track width
-DEBUG = True
+DEBUG = False
 
 
 def get_roblox_client_rect():
@@ -113,6 +119,7 @@ def main():
     prev = None                       # (t, needle_x, zone_c)
     needle_v = zone_v = 0.0
     zone_c = None
+    last_zone_c = None
     last_print = 0.0
 
     print("Coffee bot ready. F6 = toggle, F7 = quit.")
@@ -131,7 +138,7 @@ def main():
                 lock = detect(img, W, H)
                 if lock:
                     hist.clear(); bg = None; lost = 0; prev = None; frame_i = 0
-                    needle_v = zone_v = 0.0; zone_c = None
+                    needle_v = zone_v = 0.0; zone_c = None; last_zone_c = None
                     print(f"Minigame found: scale={lock[0]:.2f}, dy={lock[1]}")
                 else:
                     time.sleep(0.1)
@@ -180,21 +187,21 @@ def main():
                     dt = max(now - prev[0], 1e-3)
                     zone_v = 0.6 * zone_v + 0.4 * (new_zc - zone_c) / dt
                 zone_c = new_zc
+                last_zone_c = zone_c
 
             if prev is not None:
                 dt = max(now - prev[0], 1e-3)
                 needle_v = 0.6 * needle_v + 0.4 * (needle_x - prev[1]) / dt
             prev = (now, needle_x, zone_c)
 
-            if zone_c is not None:
-                err = (zone_c + zone_v * LOOKAHEAD) - (needle_x + needle_v * LOOKAHEAD)
-                db = DEADBAND * w
-                if err > db:
-                    set_key(True)          # hold = needle moves right
-                elif err < -db:
-                    set_key(False)         # release = needle moves left
-            else:
-                set_key(False)
+            # Steering: guide needle back to zone even if needle is fully out of zone or zone_c is temporarily missing
+            target_z = zone_c if zone_c is not None else (last_zone_c if last_zone_c is not None else 0.5 * w)
+            err = (target_z + zone_v * LOOKAHEAD) - (needle_x + needle_v * LOOKAHEAD)
+            db = DEADBAND * w
+            if err > db:
+                set_key(True)          # needle is left of target -> hold space to move right into zone
+            elif err < -db:
+                set_key(False)         # needle is right of target -> release space to move left into zone
 
             if DEBUG and now - last_print > 0.5:
                 last_print = now

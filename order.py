@@ -9,6 +9,8 @@ import tkinter as tk
 import difflib
 import time
 
+from config import MENU, SYRUPS, ORDER
+
 # dpi awareness, screen pix match win32 coordinates 1:1
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
@@ -121,10 +123,6 @@ def extract_order(text):
     m = re.search(r"pesan\s+(.+?)\s+ya\b", text, re.IGNORECASE)
     return m.group(1).strip() if m else text
 
-MENU = ["Kopi Hitam", "Cappuccino", "Es Kopi Susu"]
-SYRUPS = ["Blueberry", "Caramel", "Grape", "Hazelnut", "Mango", "Maple",
-          "Mint", "Orange", "Peach", "Raspberry", "Strawberry", "Vanilla"]
-
 
 def _best_match(text, candidates, cutoff=0.7):
     """Best fuzzy match of any candidate against same-length word windows of text."""
@@ -141,12 +139,8 @@ def _best_match(text, candidates, cutoff=0.7):
 
 
 def snap_order(text):
-    """Snap noisy OCR text to the known menu item + syrup (falls back to raw text)."""
-    menu = _best_match(text, MENU)
-    syrup = _best_match(text, SYRUPS)
-    if menu is None and syrup is None:
-        return text
-    return " ".join(p for p in (menu, syrup) if p)
+    """Snap noisy OCR text to (menu, syrup); either may be None."""
+    return _best_match(text, MENU), _best_match(text, SYRUPS)
 
 def prepare_for_ocr(frame, scale=OCR_SCALE):
     """EasyOCR (CRAFT + CRNN) works best on natural, colored images, so we only
@@ -193,7 +187,8 @@ def read_customer_order(debug=False):
         for box, text, conf in kept:
             print(f"  {conf:.2f}  {text!r}")
 
-    return snap_order(extract_order(order_text))
+    raw = extract_order(order_text)
+    return raw, *snap_order(raw)
 
 def prompt_visible(window):
     with mss.mss() as sct:
@@ -209,7 +204,9 @@ def prompt_visible(window):
     if PROMPT_DEBUG:
         print(f"[prompt score] {score:.2f}")
     return score >= PROMPT_CUTOFF
-def main():
+
+
+def main(on_tick=None):
     user32 = ctypes.windll.user32
 
     root = tk.Tk()
@@ -247,10 +244,14 @@ def main():
             window = get_roblox_client_rect()
             visible = window is not None and prompt_visible(window)
             if visible and not was_visible[0]:  # rising edge only
-                order = read_customer_order()
-                label.config(text=f"Order: {order}")
-                print(order)
+                raw, menu, syrup = read_customer_order()
+                ORDER.update(menu=menu, syrup=syrup)
+                shown = " ".join(p for p in (menu, syrup) if p) or raw
+                label.config(text=f"Order: {shown}")
+                print(shown)
             was_visible[0] = visible
+            if window is not None and on_tick:
+                on_tick(window)
         except Exception as e:
             label.config(text=f"error: {e}")
         elapsed_ms = (time.perf_counter() - t0) * 1000

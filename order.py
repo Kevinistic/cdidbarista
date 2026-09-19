@@ -8,6 +8,7 @@ import re
 import tkinter as tk
 import difflib
 import time
+import keyboard
 
 from config import MENU, SYRUPS, ORDER
 
@@ -245,6 +246,11 @@ def main(on_tick=None):
             visible = window is not None and prompt_visible(window)
             if visible and not was_visible[0]:  # rising edge only
                 raw, menu, syrup = read_customer_order()
+                if menu or syrup:
+                    try:
+                        keyboard.send("space")
+                    except Exception:
+                        pass
                 ORDER.update(menu=menu, syrup=syrup)
                 shown = " ".join(p for p in (menu, syrup) if p) or raw
                 label.config(text=f"Order: {shown}")

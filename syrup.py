@@ -8,7 +8,7 @@ import win32api
 import win32con
 import ctypes
 
-from config import SYRUPS, ORDER, UI_SCALE
+from config import DEBUG, SYRUPS, ORDER, UI_SCALE
 from order import reader, prepare_for_ocr, ALLOWLIST, _squash  # importing order also loads the OCR model once
 
 # Studio layout (Choice is centered, anchor 0.5/0.5)
@@ -21,7 +21,6 @@ TITLE_W = CHOICE_W - 28
 TITLE_TEXT = "PILIH RASA"
 TITLE_CUTOFF = 0.5          # tune with the debug print
 TITLE_OCR_SCALE = 3
-DEBUG = False
 
 
 def _origin(win, s=UI_SCALE):
@@ -162,5 +161,6 @@ def tick(win):
         if ORDER["syrup"] in SYRUPS:
             x, y = cell_center(win, SYRUPS.index(ORDER["syrup"]))
             click(x, y)
-            print(f"Selected syrup: {ORDER['syrup']}")
+            if DEBUG:
+                print(f"Selected syrup: {ORDER['syrup']}")
     _was_visible = visible

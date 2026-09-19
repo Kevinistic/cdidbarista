@@ -8,7 +8,7 @@ import win32api
 import win32con
 import ctypes
 
-from config import MENU, ORDER, UI_SCALE
+from config import DEBUG, MENU, ORDER, UI_SCALE
 from order import reader, prepare_for_ocr, ALLOWLIST, _squash  # importing order also loads the OCR model once
 
 # Studio layout (Choice is centered, anchor 0.5/0.5)
@@ -21,7 +21,6 @@ TITLE_W = CHOICE_W - 28
 TITLE_TEXT = "PESANANNYA APA?"
 TITLE_CUTOFF = 0.5          # tune with the debug print
 TITLE_OCR_SCALE = 3
-DEBUG = False
 
 
 def _origin(win, s=UI_SCALE):
@@ -162,5 +161,6 @@ def tick(win):
         if ORDER["menu"] in MENU:
             x, y = cell_center(win, MENU.index(ORDER["menu"]))
             click(x, y)
-            print(f"Selected: {ORDER['menu']}")
+            if DEBUG:
+                print(f"Selected: {ORDER['menu']}")
     _was_visible = visible

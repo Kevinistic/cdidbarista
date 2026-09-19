@@ -9,6 +9,8 @@ import mss
 import numpy as np
 import win32gui
 
+from config import DEBUG
+
 # per-monitor DPI awareness so screen pixels match win32 coordinates 1:1
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -30,6 +32,8 @@ NEEDLE_W = 30
 
 # ---------------- Detection / tuning ----------------
 UI_SCALE = 2.0        # your bar is ~643 px wide = 320 * 2
+MINIGAME_SCALE = 2.0
+MINIGAME_DY = 15
 NEEDLE_CY = 0.0       # cup label center vs track center, in studio px (tune if the box sits high/low)
 EDGE_MIN = 80         # min summed edge strength for a zone hit (tune with the edge= print)
 ORANGE_LO = (0, 100, 220)              # BGR range of the cup's orange label
@@ -39,7 +43,6 @@ GRADIENT_MIN = 50                      # min (left - right) brightness of the tr
 LOST_FRAMES = 60                       # frames without needle -> round over (increased to allow out-of-zone recovery)
 LOOKAHEAD = 0.08                       # seconds of velocity prediction
 DEADBAND = 0.015                       # fraction of track width
-DEBUG = False
 
 
 def get_roblox_client_rect():
@@ -73,34 +76,11 @@ def orange_count(bgr):
 
 
 def detect(img, W, H):
-    """Find the cup near the expected track. Returns (scale, dy) or None."""
-    s = UI_SCALE
-    x, y, w, h = track_rect(W, H, s)
-    pad = int(30 * s)
-    y0, y1 = max(0, y - pad), min(H, y + h + pad)
-    if x < 0 or x + w > W or y1 - y0 < h:
-        return None
-    m = cv2.inRange(img[y0:y1, x:x + w], ORANGE_LO, ORANGE_HI)
-    if cv2.countNonZero(m) < MIN_ORANGE * s * s:
-        return None
-    rows = m.sum(axis=1).astype(np.float32)
-    cy = y0 + float((rows * np.arange(len(rows))).sum() / rows.sum())
-    dy = int(round(cy - (y + h / 2 + NEEDLE_CY * s)))
-    y2 = y + dy
-    if y2 < 0 or y2 + h > H:
-        return None
-    gray = cv2.cvtColor(img[y2:y2 + h, x:x + w], cv2.COLOR_BGR2GRAY).astype(np.float32)
-    band = gray[int(.35 * h):int(.65 * h)].mean(axis=0)
-    if band[int(.03 * w):int(.08 * w)].mean() - band[int(.92 * w):int(.97 * w)].mean() < GRADIENT_MIN:
-        return None
-    return s, dy
+    """Roblox's coffee minigame is fixed at this scale and vertical offset."""
+    return MINIGAME_SCALE, MINIGAME_DY
 
 
-def main():
-    state = {"on": True, "quit": False}
-    keyboard.add_hotkey("F6", lambda: state.update(on=not state["on"]))
-    keyboard.add_hotkey("F7", lambda: state.update(quit=True))
-
+def main(enabled_event=None):
     held = False
 
     def set_key(want):
@@ -122,11 +102,13 @@ def main():
     last_zone_c = None
     last_print = 0.0
 
-    print("Coffee bot ready. F6 = toggle, F7 = quit.")
+    if DEBUG:
+        print("Coffee bot worker started.")
     with mss.mss() as sct:
-        while not state["quit"]:
+        while True:
             win = get_roblox_client_rect()
-            if not state["on"] or win is None:
+            is_on = enabled_event.is_set() if enabled_event is not None else True
+            if not is_on or win is None:
                 set_key(False)
                 time.sleep(0.2)
                 continue
@@ -139,7 +121,8 @@ def main():
                 if lock:
                     hist.clear(); bg = None; lost = 0; prev = None; frame_i = 0
                     needle_v = zone_v = 0.0; zone_c = None; last_zone_c = None
-                    print(f"Minigame found: scale={lock[0]:.2f}, dy={lock[1]}")
+                    if DEBUG:
+                        print(f"Minigame found: scale={lock[0]:.2f}, dy={lock[1]}")
                 else:
                     time.sleep(0.1)
                 continue
@@ -156,7 +139,8 @@ def main():
                 if lost > LOST_FRAMES:
                     set_key(False)
                     lock = None
-                    print("Round over.")
+                    if DEBUG:
+                        print("Round over.")
                 continue
             lost = 0
             colsum = m.sum(axis=0).astype(np.float32)

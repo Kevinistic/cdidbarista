@@ -1,4 +1,9 @@
+DEBUG = False
+
 UI_SCALE = 2.0
+
+TOGGLE_KEY = "F6"
+FORCE_CLOSE_KEY = "F7"
 
 MENU = ["Kopi Hitam", "Cappuccino", "Es Kopi Susu", "Americano", "Latte"]
 SYRUPS = ["Blueberry", "Caramel", "Grape", "Hazelnut", "Mango", "Maple",

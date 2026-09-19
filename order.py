@@ -10,7 +10,7 @@ import difflib
 import time
 import keyboard
 
-from config import MENU, SYRUPS, ORDER
+from config import DEBUG, MENU, SYRUPS, ORDER
 
 # dpi awareness, screen pix match win32 coordinates 1:1
 try:
@@ -101,7 +101,7 @@ PROMPT_POS_X, PROMPT_POS_Y       = 0.5, 0.876
 PROMPT_SIZE_X, PROMPT_SIZE_Y     = 0.2, 0.04
 PROMPT_TEXT = "klik untuk lanjut"
 PROMPT_OCR_SCALE = 3
-PROMPT_DEBUG = False
+PROMPT_DEBUG = DEBUG
 PROMPT_CUTOFF = 0.47
 POLL_MS = 100
 
@@ -207,7 +207,7 @@ def prompt_visible(window):
     return score >= PROMPT_CUTOFF
 
 
-def main(on_tick=None):
+def main(on_tick=None, enabled_event=None):
     user32 = ctypes.windll.user32
 
     root = tk.Tk()
@@ -238,32 +238,43 @@ def main(on_tick=None):
     user32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80)
 
     was_visible = [False]
+    last_shown = ["-"]
 
     def poll():
         t0 = time.perf_counter()
         try:
-            window = get_roblox_client_rect()
-            visible = window is not None and prompt_visible(window)
-            if visible and not was_visible[0]:  # rising edge only
-                raw, menu, syrup = read_customer_order()
-                if menu or syrup:
-                    try:
-                        keyboard.send("space")
-                    except Exception:
-                        pass
-                ORDER.update(menu=menu, syrup=syrup)
-                shown = " ".join(p for p in (menu, syrup) if p) or raw
-                label.config(text=f"Order: {shown}")
-                print(shown)
-            was_visible[0] = visible
-            if window is not None and on_tick:
-                on_tick(window)
+            is_enabled = enabled_event.is_set() if enabled_event is not None else True
+            if not is_enabled:
+                label.config(text=f"Order: {last_shown[0]} [PAUSED]", bg="#552222")
+                was_visible[0] = False
+            else:
+                if "PAUSED" in label.cget("text"):
+                    label.config(text=f"Order: {last_shown[0]}", bg="#222222")
+                window = get_roblox_client_rect()
+                visible = window is not None and prompt_visible(window)
+                if visible and not was_visible[0]:  # rising edge only
+                    raw, menu, syrup = read_customer_order()
+                    if menu or syrup:
+                        try:
+                            keyboard.send("space")
+                        except Exception:
+                            pass
+                    ORDER.update(menu=menu, syrup=syrup)
+                    shown = " ".join(p for p in (menu, syrup) if p) or raw
+                    last_shown[0] = shown
+                    label.config(text=f"Order: {shown}", bg="#222222")
+                    if DEBUG:
+                        print(shown)
+                was_visible[0] = visible
+                if window is not None and on_tick:
+                    on_tick(window)
         except Exception as e:
             label.config(text=f"error: {e}")
         elapsed_ms = (time.perf_counter() - t0) * 1000
         root.after(max(1, int(POLL_MS - elapsed_ms)), poll)  # keep a steady cadence
 
-    print("OCR ready.")
+    if DEBUG:
+        print("OCR ready.")
     poll()
     root.mainloop()
 

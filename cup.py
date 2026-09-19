@@ -128,14 +128,14 @@ def click(x, y):
     """Smoothly moves cursor to (x, y) via SendInput hardware events so Roblox UI registers hover & click."""
     start_x, start_y = win32api.GetCursorPos()
     dist = int(((x - start_x) ** 2 + (y - start_y) ** 2) ** 0.5)
-    steps = max(6, min(dist // 12, 25))
+    steps = max(3, min(dist // 30, 12))
 
     for step in range(1, steps + 1):
         cx = int(start_x + (x - start_x) * step / steps)
         cy = int(start_y + (y - start_y) * step / steps)
         win32api.SetCursorPos((cx, cy))
         _send_mouse_input(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, cx, cy)
-        time.sleep(0.008)
+        time.sleep(0.003)
 
     win32api.SetCursorPos((x, y))
     _send_mouse_input(MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, x, y)

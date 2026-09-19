@@ -8,7 +8,7 @@ import win32api
 import win32con
 import ctypes
 
-from config import MENU, ORDER, UI_SCALE
+from config import SYRUPS, ORDER, UI_SCALE
 from order import reader, prepare_for_ocr, ALLOWLIST, _squash  # importing order also loads the OCR model once
 
 # Studio layout (Choice is centered, anchor 0.5/0.5)
@@ -18,7 +18,7 @@ CELL_W, CELL_H, PAD = 104, 124, 8
 COLS = (CHOICE_W - 28 + PAD) // (CELL_W + PAD)      # grid is 552 px wide -> 5
 TITLE_X, TITLE_Y, TITLE_H = 14, 32, 26
 TITLE_W = CHOICE_W - 28
-TITLE_TEXT = "PESANANNYA APA?"
+TITLE_TEXT = "PILIH RASA"
 TITLE_CUTOFF = 0.5          # tune with the debug print
 TITLE_OCR_SCALE = 3
 DEBUG = False
@@ -54,11 +54,11 @@ def choice_visible(win, s=UI_SCALE):
             full_shot = np.array(sct.grab({"left": win["left"], "top": win["top"], "width": win["width"], "height": win["height"]}))
             full_bgr = cv2.cvtColor(full_shot, cv2.COLOR_BGRA2BGR)
             cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
-            cv2.imwrite("debug_cup_full.png", full_bgr)
+            cv2.imwrite("debug_syrup_full.png", full_bgr)
 
     img = prepare_for_ocr(cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR), scale=TITLE_OCR_SCALE)
     if should_save:
-        cv2.imwrite("debug_cup_title.png", img)
+        cv2.imwrite("debug_syrup_title.png", img)
 
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -151,16 +151,16 @@ _was_visible = False
 
 
 def tick(win):
-    """Called by order.py's poll loop; clicks the ordered cup on the Choice screen's rising edge."""
+    """Called by order.py's poll loop; clicks the ordered syrup on the Choice screen's rising edge."""
     global _was_visible
-    if not ORDER["menu"]:
+    if not ORDER["syrup"]:
         _was_visible = False
         return
     visible = choice_visible(win)
     if visible and not _was_visible:
         time.sleep(0.05)                     # let the grid finish any open tween
-        if ORDER["menu"] in MENU:
-            x, y = cell_center(win, MENU.index(ORDER["menu"]))
+        if ORDER["syrup"] in SYRUPS:
+            x, y = cell_center(win, SYRUPS.index(ORDER["syrup"]))
             click(x, y)
-            print(f"Selected: {ORDER['menu']}")
+            print(f"Selected syrup: {ORDER['syrup']}")
     _was_visible = visible

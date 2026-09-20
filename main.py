@@ -1,5 +1,7 @@
 import multiprocessing
 import os
+import ctypes
+import tkinter as tk
 import keyboard
 import config
 import coffee
@@ -14,6 +16,54 @@ def _run_coffee(enabled_event):
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+
+    root = tk.Tk()
+    root.overrideredirect(True)
+    root.attributes("-topmost", True)
+    root.geometry("300x160+20+200")
+    root.resizable(False, False)
+    label = tk.Label(
+        root,
+        text=(f"Toggle: {config.TOGGLE_KEY}\n"
+              f"Terminate: {config.FORCE_CLOSE_KEY}\n"
+              "Order: -"),
+        bg="#222222",
+        fg="white",
+        font=("Segoe UI", 11, "bold"),
+        justify="left",
+        anchor="w",
+        wraplength=284,
+        padx=8,
+        pady=4,
+    )
+    label.pack(fill="both", expand=True)
+
+    drag = {"x": 0, "y": 0}
+
+    def start_drag(event):
+        drag["x"] = event.x_root - root.winfo_x()
+        drag["y"] = event.y_root - root.winfo_y()
+
+    def do_drag(event):
+        root.geometry(f"+{event.x_root - drag['x']}+{event.y_root - drag['y']}")
+
+    label.bind("<Button-1>", start_drag)
+    label.bind("<B1-Motion>", do_drag)
+    root.update()
+
+    # Keep the overlay from stealing focus from Roblox.
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetParent(root.winfo_id())
+    ex = user32.GetWindowLongW(hwnd, -20)
+    user32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80)
+
+    def update_status(text, background):
+        label.config(
+            text=(f"Toggle: {config.TOGGLE_KEY}\n"
+                  f"Terminate: {config.FORCE_CLOSE_KEY}\n"
+                  f"{text}"),
+            bg=background,
+        )
 
     enabled_event = multiprocessing.Event()
     enabled_event.set()  # Default: ON (active)
@@ -50,7 +100,9 @@ if __name__ == "__main__":
     print(f"CDID Barista Bot ready. {config.TOGGLE_KEY} = Toggle ON/OFF, {config.FORCE_CLOSE_KEY} = Force Close (Quit).")
 
     try:
-        order.main(on_tick=_tick, enabled_event=enabled_event)
+        order.main(on_tick=_tick, enabled_event=enabled_event,
+                   on_status=update_status, schedule=root.after)
+        root.mainloop()
     finally:
         try:
             keyboard.release("space")

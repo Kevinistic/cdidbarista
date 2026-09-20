@@ -5,7 +5,6 @@ import win32gui
 import ctypes
 import easyocr
 import re
-import tkinter as tk
 import difflib
 import time
 import keyboard
@@ -103,7 +102,7 @@ PROMPT_TEXT = "klik untuk lanjut"
 PROMPT_OCR_SCALE = 3
 PROMPT_DEBUG = DEBUG
 PROMPT_CUTOFF = 0.47
-POLL_MS = 100
+POLL_MS = 50
 
 def _squash(s):
     return "".join(s.lower().split())
@@ -207,49 +206,23 @@ def prompt_visible(window):
     return score >= PROMPT_CUTOFF
 
 
-def main(on_tick=None, enabled_event=None):
-    user32 = ctypes.windll.user32
-
-    root = tk.Tk()
-    root.overrideredirect(True)
-    root.attributes("-topmost", True)
-    root.geometry("+20+200")  # fixed position, top-left of the screen
-    label = tk.Label(root, text="Order: -", bg="#222222", fg="white",
-                    font=("Segoe UI", 11, "bold"), padx=8, pady=4)
-    label.pack()
-
-    drag = {"x": 0, "y": 0}
-
-    def start_drag(e):
-        drag["x"] = e.x_root - root.winfo_x()
-        drag["y"] = e.y_root - root.winfo_y()
-
-    def do_drag(e):
-        root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}")
-
-    label.bind("<Button-1>", start_drag)
-    label.bind("<B1-Motion>", do_drag)
-
-    root.update()
-
-    # no-activate + tool window, so the overlay never steals Roblox's focus
-    hwnd = user32.GetParent(root.winfo_id())
-    ex = user32.GetWindowLongW(hwnd, -20)
-    user32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80)
-
+def main(on_tick=None, enabled_event=None, on_status=None, schedule=None):
     was_visible = [False]
     last_shown = ["-"]
+
+    def set_status(text, background):
+        if on_status:
+            on_status(text, background)
 
     def poll():
         t0 = time.perf_counter()
         try:
             is_enabled = enabled_event.is_set() if enabled_event is not None else True
             if not is_enabled:
-                label.config(text=f"Order: {last_shown[0]} [PAUSED]", bg="#552222")
+                set_status(f"Order: {last_shown[0]} [PAUSED]", "#552222")
                 was_visible[0] = False
             else:
-                if "PAUSED" in label.cget("text"):
-                    label.config(text=f"Order: {last_shown[0]}", bg="#222222")
+                set_status(f"Order: {last_shown[0]}", "#225522")
                 window = get_roblox_client_rect()
                 visible = window is not None and prompt_visible(window)
                 if visible and not was_visible[0]:  # rising edge only
@@ -262,21 +235,21 @@ def main(on_tick=None, enabled_event=None):
                     ORDER.update(menu=menu, syrup=syrup)
                     shown = " ".join(p for p in (menu, syrup) if p) or raw
                     last_shown[0] = shown
-                    label.config(text=f"Order: {shown}", bg="#222222")
+                    set_status(f"Order: {shown}", "#225522")
                     if DEBUG:
                         print(shown)
                 was_visible[0] = visible
                 if window is not None and on_tick:
                     on_tick(window)
         except Exception as e:
-            label.config(text=f"error: {e}")
+            set_status(f"error: {e}", "#552222")
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        root.after(max(1, int(POLL_MS - elapsed_ms)), poll)  # keep a steady cadence
+        if schedule:
+            schedule(max(1, int(POLL_MS - elapsed_ms)), poll)
 
     if DEBUG:
         print("OCR ready.")
     poll()
-    root.mainloop()
 
 
 if __name__ == "__main__":

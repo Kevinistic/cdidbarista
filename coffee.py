@@ -76,8 +76,18 @@ def orange_count(bgr):
 
 
 def detect(img, W, H):
-    """Roblox's coffee minigame is fixed at this scale and vertical offset."""
-    return MINIGAME_SCALE, MINIGAME_DY
+    """Return the fixed layout only when the coffee needle is actually visible."""
+    s, dy = MINIGAME_SCALE, MINIGAME_DY
+    x, y, w, h = track_rect(W, H, s, dy)
+    if x < 0 or y < 0 or x + w > W or y + h > H:
+        return None
+
+    # The orange cup/needle identifies an active minigame.  Without this
+    # check, the worker locks on to choice dialogs and keeps handling Space.
+    strip = img[y:y + h, x:x + w]
+    if orange_count(strip) < MIN_ORANGE * s * s:
+        return None
+    return s, dy
 
 
 def main(enabled_event=None):
@@ -135,6 +145,10 @@ def main(enabled_event=None):
 
             m = cv2.inRange(strip, ORANGE_LO, ORANGE_HI)
             if cv2.countNonZero(m) < MIN_ORANGE * s * s:
+                # The control is no longer visible (for example, a Choice
+                # dialog replaced it).  Stop sending Space immediately while
+                # retaining the short loss window for a transient bad frame.
+                set_key(False)
                 lost += 1
                 if lost > LOST_FRAMES:
                     set_key(False)

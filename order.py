@@ -9,7 +9,7 @@ import difflib
 import time
 import keyboard
 
-from config import DEBUG, MENU, SYRUPS, ORDER
+from config import DEBUG, MENU, SYRUPS, ORDER, FRAME_DIFF_THRESHOLD
 
 # dpi awareness, screen pix match win32 coordinates 1:1
 try:
@@ -28,6 +28,9 @@ except Exception:
     USE_GPU = False
 
 reader = easyocr.Reader(["id", "en"], gpu=USE_GPU)
+
+# Persistent mss screen-capture context — opened once, reused on every call.
+_sct = mss.mss()
 
 OCR_SCALE = 1 # upscale factor for ocr, originally 3
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!?,.' " # char whitelist
@@ -156,8 +159,7 @@ def read_customer_order(debug=False):
 
     crop_region = get_order_crop_region(roblox_window)
 
-    with mss.mss() as sct:
-        screenshot = np.array(sct.grab(crop_region))
+    screenshot = np.array(_sct.grab(crop_region))
     frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
     img = prepare_for_ocr(frame)
 
@@ -190,9 +192,25 @@ def read_customer_order(debug=False):
     raw = extract_order(order_text)
     return raw, *snap_order(raw)
 
+# Frame diff state for prompt_visible — skip OCR when the region hasn't changed.
+_prev_prompt_gray = None
+_prompt_cached_result = False
+
+
 def prompt_visible(window):
-    with mss.mss() as sct:
-        shot = np.array(sct.grab(get_prompt_region(window)))
+    global _prev_prompt_gray, _prompt_cached_result
+    shot = np.array(_sct.grab(get_prompt_region(window)))
+
+    # Frame diff guard: downsample to a tiny thumbnail and compare with previous frame.
+    # If the region is pixel-stable we can reuse the last OCR decision for free.
+    small = cv2.resize(shot[:, :, :3], (32, 8), interpolation=cv2.INTER_AREA)
+    gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    if _prev_prompt_gray is not None:
+        diff = float(np.mean(np.abs(gray_small.astype(np.float32) - _prev_prompt_gray.astype(np.float32))))
+        if diff < FRAME_DIFF_THRESHOLD:
+            return _prompt_cached_result
+    _prev_prompt_gray = gray_small
+
     img = prepare_for_ocr(cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR), scale=PROMPT_OCR_SCALE)
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
@@ -203,7 +221,8 @@ def prompt_visible(window):
     score = difflib.SequenceMatcher(None, _squash(text), _squash(PROMPT_TEXT)).ratio()
     if PROMPT_DEBUG:
         print(f"[prompt score] {score:.2f}")
-    return score >= PROMPT_CUTOFF
+    _prompt_cached_result = score >= PROMPT_CUTOFF
+    return _prompt_cached_result
 
 
 def main(on_tick=None, enabled_event=None, on_status=None, schedule=None):

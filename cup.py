@@ -8,7 +8,7 @@ import win32api
 import win32con
 import ctypes
 
-from config import DEBUG, MENU, ORDER, UI_SCALE
+from config import DEBUG, MENU, ORDER, UI_SCALE, FRAME_DIFF_THRESHOLD
 from order import reader, prepare_for_ocr, ALLOWLIST, _squash  # importing order also loads the OCR model once
 
 # Studio layout (Choice is centered, anchor 0.5/0.5)
@@ -28,11 +28,17 @@ def _origin(win, s=UI_SCALE):
     return win["width"] / 2 - CHOICE_W * s / 2, win["height"] / 2 - CHOICE_H * s / 2
 
 
+
 _last_debug_save = 0.0
+# Persistent mss screen-capture context — opened once, reused on every tick.
+_sct = mss.mss()
+# Frame diff state for choice_visible — skip OCR when the title region hasn't changed.
+_prev_title_gray = None
+_title_cached_result = False
 
 
 def choice_visible(win, s=UI_SCALE):
-    global _last_debug_save
+    global _last_debug_save, _prev_title_gray, _title_cached_result
     ox, oy = _origin(win, s)
     rx, ry = int(ox + TITLE_X * s), int(oy + TITLE_Y * s)
     rw, rh = int(TITLE_W * s), int(TITLE_H * s)
@@ -43,17 +49,26 @@ def choice_visible(win, s=UI_SCALE):
         "width": rw,
         "height": rh,
     }
+    shot = np.array(_sct.grab(region))
+
+    # Frame diff guard: compare a tiny grayscale thumbnail against the previous frame.
+    # On a static screen this skips all OCR work at the cost of one cheap resize+diff.
+    small = cv2.resize(shot[:, :, :3], (48, 8), interpolation=cv2.INTER_AREA)
+    gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    if _prev_title_gray is not None:
+        diff = float(np.mean(np.abs(gray_small.astype(np.float32) - _prev_title_gray.astype(np.float32))))
+        if diff < FRAME_DIFF_THRESHOLD:
+            return _title_cached_result
+    _prev_title_gray = gray_small
+
     now = time.time()
     should_save = DEBUG and (now - _last_debug_save >= 1.0)
-
-    with mss.mss() as sct:
-        shot = np.array(sct.grab(region))
-        if should_save:
-            _last_debug_save = now
-            full_shot = np.array(sct.grab({"left": win["left"], "top": win["top"], "width": win["width"], "height": win["height"]}))
-            full_bgr = cv2.cvtColor(full_shot, cv2.COLOR_BGRA2BGR)
-            cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
-            cv2.imwrite("debug_cup_full.png", full_bgr)
+    if should_save:
+        _last_debug_save = now
+        full_shot = np.array(_sct.grab({"left": win["left"], "top": win["top"], "width": win["width"], "height": win["height"]}))
+        full_bgr = cv2.cvtColor(full_shot, cv2.COLOR_BGRA2BGR)
+        cv2.rectangle(full_bgr, (rx, ry), (rx + rw, ry + rh), (0, 255, 0), 2)
+        cv2.imwrite("debug_cup_full.png", full_bgr)
 
     img = prepare_for_ocr(cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR), scale=TITLE_OCR_SCALE)
     if should_save:
@@ -69,7 +84,8 @@ def choice_visible(win, s=UI_SCALE):
     score = difflib.SequenceMatcher(None, sq_raw, sq_title).ratio()
     if DEBUG and should_save:
         print(f"[title score] {score:.2f} | text: {raw_text!r}")
-    return sq_title in sq_raw or score >= TITLE_CUTOFF
+    _title_cached_result = sq_title in sq_raw or score >= TITLE_CUTOFF
+    return _title_cached_result
 
 
 # Native Windows SendInput API (Roblox processes SendInput hardware events)

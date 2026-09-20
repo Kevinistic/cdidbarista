@@ -29,12 +29,33 @@ except Exception:
 
 reader = easyocr.Reader(["id", "en"], gpu=USE_GPU)
 
+# Reader construction loads the model files, but EasyOCR still performs some
+# lazy setup on its first inference (notably CUDA initialization when enabled).
+# Keep this state here so a warm-up is safe to call more than once.
+_ocr_warmed_up = False
+
 # Persistent mss screen-capture context — opened once, reused on every call.
 _sct = mss.mss()
 
 OCR_SCALE = 1 # upscale factor for ocr, originally 3
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!?,.' " # char whitelist
 MIN_CONFIDENCE = 0.2 # ignore detections below this confidence (0..1)
+
+
+def warm_up_ocr():
+    """Run both EasyOCR stages once before the bot starts polling.
+
+    A blank, in-memory image is intentional: this primes the models without
+    needing Roblox to be open or relying on any screen content.
+    """
+    global _ocr_warmed_up
+    if _ocr_warmed_up:
+        return
+
+    # readtext exercises the CRAFT detector and recognition model together.
+    blank = np.zeros((64, 512, 3), dtype=np.uint8)
+    reader.readtext(blank, detail=0, allowlist=ALLOWLIST)
+    _ocr_warmed_up = True
 
 
 def get_roblox_client_rect():

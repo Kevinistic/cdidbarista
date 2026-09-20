@@ -3,11 +3,7 @@ import os
 import ctypes
 import tkinter as tk
 import keyboard
-import config
 import coffee
-import cup
-import syrup
-import order
 
 
 def _run_coffee(enabled_event):
@@ -16,6 +12,12 @@ def _run_coffee(enabled_event):
 
 if __name__ == "__main__":
     multiprocessing.freeze_support()
+
+    # keeping out cuz windows doesnt like multiprocessing with frozen executables
+    import config
+    import cup
+    import syrup
+    import order
 
     root = tk.Tk()
     root.overrideredirect(True)
@@ -56,6 +58,18 @@ if __name__ == "__main__":
     hwnd = user32.GetParent(root.winfo_id())
     ex = user32.GetWindowLongW(hwnd, -20)
     user32.SetWindowLongW(hwnd, -20, ex | 0x08000000 | 0x80)
+
+    # EasyOCR only finishes initializing on its first inference. Do that now,
+    # before the polling loop can see its first order/prompt.
+    label.config(text="Starting OCR models...", bg="#222222")
+    root.update_idletasks()
+    try:
+        order.warm_up_ocr()
+        print("OCR warmed up.")
+    except Exception as exc:
+        # Keep the bot usable if warm-up fails; normal polling will surface the
+        # same underlying OCR error in the overlay.
+        print(f"OCR warm-up failed: {exc}")
 
     def update_status(text, background):
         label.config(

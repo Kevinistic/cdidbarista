@@ -5,7 +5,9 @@ UI_SCALE = 2.0
 TOGGLE_KEY = "F6"
 FORCE_CLOSE_KEY = "F7"
 
-MENU = ["Kopi Hitam", "Cappuccino", "Es Kopi Susu", "Americano", "Latte"]
+MENU = ["Kopi Hitam", "Cappuccino", "Es Kopi Susu", "Americano", "Latte", 
+            "Cokelat Panas", "Mocha", "Macchiato", "Frappuccino",
+            "Teh", "Thai Tea", "Matcha", "Bubble Tea", "Soda", "Lemonade"]
 SYRUPS = ["Blueberry", "Caramel", "Grape", "Hazelnut", "Mango", "Maple",
           "Mint", "Orange", "Peach", "Raspberry", "Strawberry", "Vanilla"]
 

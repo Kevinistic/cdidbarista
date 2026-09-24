@@ -1,200 +1,140 @@
-import ctypes
+"""EKSTRAKSI shot minigame: hold SPACE to lift the needle (cup icon), keep it in the Perfect zone."""
 import time
-import warnings
-from collections import deque
 
 import cv2
 import keyboard
-import mss
 import numpy as np
-import win32gui
 
 from config import DEBUG
 
-# per-monitor DPI awareness so screen pixels match win32 coordinates 1:1
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    ctypes.windll.user32.SetProcessDPIAware()
+# The track is a wide tan -> dark-brown gradient bar in the bottom of the screen.
+SEARCH_TOP = 0.6                        # fraction of client height to start looking
+TRACK_LO, TRACK_HI = (5, 60, 20), (21, 255, 255)
+TRACK_ASPECT = (5.0, 14.0)              # w / h, 400x42 at 1920x1172
+TRACK_MIN_W = 0.1                       # fraction of client width
+TRACK_FILL = 0.75
 
-# Set high-precision 1ms timer resolution on Windows for precise 5ms sleep & velocity tracking
-try:
-    ctypes.windll.winmm.timeBeginPeriod(1)
-except Exception:
-    pass
+# HSV ranges measured from the recordings.
+ZONE_LO, ZONE_HI = (16, 135, 140), (21, 190, 205)   # flat fill of the Perfect zone
+NEEDLE_S, NEEDLE_V = 200, 170                       # orange (in zone) or red (out of zone) cup
 
-# ---------------- Studio layout (from your data) ----------------
-FRAME_POS_Y = 0.9                      # frame: anchor (0.5, 1), position (0.5, 0.9)
-FRAME_W, FRAME_H = 430, 128
-TRACK_X, TRACK_Y, TRACK_W, TRACK_H = 14, 32, 320, 34
-ZONE_W_RATIO = 0.2
-NEEDLE_W = 30
-
-# ---------------- Detection / tuning ----------------
-UI_SCALE = 2.0        # your bar is ~643 px wide = 320 * 2
-MINIGAME_SCALE = 2.0
-MINIGAME_DY = 15
-NEEDLE_CY = 0.0       # cup label center vs track center, in studio px (tune if the box sits high/low)
-EDGE_MIN = 80         # min summed edge strength for a zone hit (tune with the edge= print)
-ORANGE_LO = (0, 100, 220)              # BGR range of the cup's orange label
-ORANGE_HI = (70, 170, 255)
-MIN_ORANGE = 40                        # min orange px = MIN_ORANGE * scale^2
-GRADIENT_MIN = 50                      # min (left - right) brightness of the track
-LOST_FRAMES = 60                       # frames without needle -> round over (increased to allow out-of-zone recovery)
-LOOKAHEAD = 0.08                       # seconds of velocity prediction
-DEADBAND = 0.015                       # fraction of track width
+LOST_FRAMES = 40          # frames without a needle -> round over
+LOOKAHEAD = 0.08          # seconds of velocity prediction
+DEADBAND = 0.015          # fraction of track width
 
 
-def get_roblox_client_rect():
-    def cb(hwnd, windows):
-        if win32gui.IsWindowVisible(hwnd) and "roblox" in win32gui.GetWindowText(hwnd).lower():
-            windows.append(hwnd)
-    windows = []
-    win32gui.EnumWindows(cb, windows)
-    if not windows:
-        return None
-    hwnd = windows[0]
-    _, _, w, h = win32gui.GetClientRect(hwnd)
-    left, top = win32gui.ClientToScreen(hwnd, (0, 0))
-    return {"left": left, "top": top, "width": w, "height": h}
+def find_track(img):
+    """Locate the EKSTRAKSI track in a full client screenshot. Returns (x, y, w, h) or None."""
+    H, W = img.shape[:2]
+    top = int(SEARCH_TOP * H)
+    hsv = cv2.cvtColor(img[top:], cv2.COLOR_BGR2HSV)
+    mask = cv2.morphologyEx(cv2.inRange(hsv, TRACK_LO, TRACK_HI), cv2.MORPH_OPEN,
+                            np.ones((3, 3), np.uint8))
+    n, _, stats, _ = cv2.connectedComponentsWithStats(mask)
+    best = None
+    for x, y, w, h, area in stats[1:]:
+        if w < TRACK_MIN_W * W or not TRACK_ASPECT[0] <= w / max(h, 1) <= TRACK_ASPECT[1]:
+            continue
+        if area < TRACK_FILL * w * h:
+            continue
+        v = hsv[y + h // 4:y + 3 * h // 4, :, 2]
+        if np.median(v[:, x:x + w // 20]) < 150 or np.median(v[:, x + w - w // 20:x + w]) > 100:
+            continue                    # not light-to-dark
+        if best is None or w > best[2]:
+            best = (int(x), int(y) + top, int(w), int(h))
+    if DEBUG and best:
+        print(f"[coffee] track at {best}")
+    return best
 
 
-def track_rect(W, H, s, dy=0):
-    """Track rectangle in client coordinates (dy = vertical correction from detect)."""
-    frame_bottom = FRAME_POS_Y * H
-    frame_left = W / 2 - FRAME_W * s / 2
-    x = frame_left + TRACK_X * s
-    y = frame_bottom - FRAME_H * s + TRACK_Y * s + dy
-    return int(x), int(y), int(TRACK_W * s), int(TRACK_H * s)
+def locate(strip):
+    """(needle_x, zone_center) in strip pixels; either may be None."""
+    h, w = strip.shape[:2]
+    hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+    sat = (hsv[..., 1] >= NEEDLE_S) & (hsv[..., 2] >= NEEDLE_V)
+    red = (hsv[..., 0] <= 22) | (hsv[..., 0] >= 170)
+    needle = (sat & red).astype(np.uint8)
+    colsum = needle.sum(axis=0).astype(np.float32)
+    needle_x = None
+    if colsum.sum() >= 0.004 * h * w:
+        needle_x = float((colsum * np.arange(w)).sum() / colsum.sum())
 
-def grab(sct, region):
-    return np.ascontiguousarray(np.array(sct.grab(region))[:, :, :3])
+    band = hsv[int(.2 * h):int(.8 * h)]
+    zone_cols = cv2.inRange(band, ZONE_LO, ZONE_HI).mean(axis=0) / 255 > 0.4
+    zone_cols &= colsum == 0
+    # bridge the gap the cup leaves when it sits inside the zone
+    gap = int(0.2 * w)
+    runs, start, last = [], None, -gap
+    for i in np.flatnonzero(zone_cols):
+        if start is None or i - last > gap:
+            if start is not None:
+                runs.append((start, last))
+            start = i
+        last = i
+    if start is not None:
+        runs.append((start, last))
+    runs = [r for r in runs if 0.08 * w <= r[1] - r[0] <= 0.4 * w]
+    zone_c = None
+    if runs:
+        a, b = max(runs, key=lambda r: r[1] - r[0])
+        zone_c = (a + b) / 2
+    return needle_x, zone_c
 
 
-def orange_count(bgr):
-    return cv2.countNonZero(cv2.inRange(bgr, ORANGE_LO, ORANGE_HI))
+def play(grab, is_running, timeout=4.0):
+    """Play one round. grab(rect) -> BGR of that client rect; grab(None) -> full client.
+    is_running() -> False aborts. Returns True if a round was played."""
+    t0 = time.time()
+    rect = None
+    while rect is None:
+        if time.time() - t0 > timeout or not is_running():
+            return False
+        rect = find_track(grab(None))
+    x, y, w, h = rect
 
-
-def detect(img, W, H):
-    """Roblox's coffee minigame is fixed at this scale and vertical offset."""
-    return MINIGAME_SCALE, MINIGAME_DY
-
-
-def main(enabled_event=None):
     held = False
 
     def set_key(want):
         nonlocal held
-        if want and not held:
-            keyboard.press("space")
-        elif not want and held:
-            keyboard.release("space")
-        held = want
+        if want != held:
+            (keyboard.press if want else keyboard.release)("space")
+            held = want
 
-    lock = None
-    hist = deque(maxlen=90)
-    bg = None
     lost = 0
-    frame_i = 0
-    prev = None                       # (t, needle_x, zone_c)
+    prev = None
     needle_v = zone_v = 0.0
     zone_c = None
-    last_zone_c = None
     last_print = 0.0
-
-    if DEBUG:
-        print("Coffee bot worker started.")
-    with mss.mss() as sct:
-        while True:
-            win = get_roblox_client_rect()
-            is_on = enabled_event.is_set() if enabled_event is not None else True
-            if not is_on or win is None:
-                set_key(False)
-                time.sleep(0.2)
-                continue
-            W, H = win["width"], win["height"]
-
-            # ---- idle: look for the minigame ----
-            if lock is None:
-                img = grab(sct, win)
-                lock = detect(img, W, H)
-                if lock:
-                    hist.clear(); bg = None; lost = 0; prev = None; frame_i = 0
-                    needle_v = zone_v = 0.0; zone_c = None; last_zone_c = None
-                    if DEBUG:
-                        print(f"Minigame found: scale={lock[0]:.2f}, dy={lock[1]}")
-                else:
-                    time.sleep(0.1)
-                continue
-
-            # ---- tracking ----
-            s, dy = lock
-            x, y, w, h = track_rect(W, H, s, dy)
-            region = {"left": win["left"] + x, "top": win["top"] + y, "width": w, "height": h}
-            strip = grab(sct, region)
-
-            m = cv2.inRange(strip, ORANGE_LO, ORANGE_HI)
-            if cv2.countNonZero(m) < MIN_ORANGE * s * s:
+    try:
+        while is_running():
+            strip = grab(rect)
+            needle_x, new_zc = locate(strip)
+            now = time.perf_counter()
+            if needle_x is None:
                 lost += 1
                 if lost > LOST_FRAMES:
-                    set_key(False)
-                    lock = None
-                    if DEBUG:
-                        print("Round over.")
+                    break
                 continue
             lost = 0
-            colsum = m.sum(axis=0).astype(np.float32)
-            cols = np.arange(w, dtype=np.float32)
-            needle_x = float((colsum * cols).sum() / colsum.sum())
-
-            # zone = two bright stroke edges exactly ZONE_W_RATIO * track width apart
-            r0, r1 = int(.35 * h), int(.65 * h)
-            band = strip[r0:r1].astype(np.float32).mean(axis=0)          # (w, 3)
-            cover = np.abs(cols - needle_x) < 0.5 * NEEDLE_W * s         # cup hides the zone here
-            k = max(2, int(2 * s))
-            edge = np.zeros(w, np.float32)
-            edge[k // 2:k // 2 + w - k] = np.linalg.norm(band[k:] - band[:-k], axis=1)
-            edge = np.clip(edge - np.median(edge), 0, None)
-            edge[cover] = 0
-            edge[:int(4 * s)] = 0
-            edge[-int(4 * s):] = 0                                       # bar end caps
-            tol = int(3 * s)
-            edge = cv2.dilate(edge.reshape(1, -1), np.ones((1, 2 * tol + 1), np.uint8)).ravel()
-
-            now = time.perf_counter()
-            zw = max(2, int(ZONE_W_RATIO * w))
-            score = edge[:w - zw] + edge[zw:]
-            i = int(np.argmax(score))
-            if score[i] >= EDGE_MIN:
-                new_zc = i + zw / 2
+            if new_zc is not None:
                 if prev is not None and zone_c is not None:
-                    dt = max(now - prev[0], 1e-3)
-                    zone_v = 0.6 * zone_v + 0.4 * (new_zc - zone_c) / dt
+                    zone_v = 0.6 * zone_v + 0.4 * (new_zc - zone_c) / max(now - prev[0], 1e-3)
                 zone_c = new_zc
-                last_zone_c = zone_c
-
             if prev is not None:
-                dt = max(now - prev[0], 1e-3)
-                needle_v = 0.6 * needle_v + 0.4 * (needle_x - prev[1]) / dt
-            prev = (now, needle_x, zone_c)
+                needle_v = 0.6 * needle_v + 0.4 * (needle_x - prev[1]) / max(now - prev[0], 1e-3)
+            prev = (now, needle_x)
 
-            # Steering: guide needle back to zone even if needle is fully out of zone or zone_c is temporarily missing
-            target_z = zone_c if zone_c is not None else (last_zone_c if last_zone_c is not None else 0.5 * w)
-            err = (target_z + zone_v * LOOKAHEAD) - (needle_x + needle_v * LOOKAHEAD)
-            db = DEADBAND * w
-            if err > db:
-                set_key(True)          # needle is left of target -> hold space to move right into zone
-            elif err < -db:
-                set_key(False)         # needle is right of target -> release space to move left into zone
+            target = zone_c if zone_c is not None else 0.5 * w
+            err = (target + zone_v * LOOKAHEAD) - (needle_x + needle_v * LOOKAHEAD)
+            if err > DEADBAND * w:
+                set_key(True)          # needle left of the zone: lift it
+            elif err < -DEADBAND * w:
+                set_key(False)         # needle right of the zone: let it fall back
 
             if DEBUG and now - last_print > 0.5:
                 last_print = now
-                print(f"needle={needle_x:6.1f}  zone={zone_c}  held={held}  edge={score.max():.0f}")
-                cv2.imwrite("debug_coffee.png", strip)
-            time.sleep(0.005)
-
-    set_key(False)
-
-
-if __name__ == "__main__":
-    main()
+                print(f"[coffee] needle={needle_x:6.1f} zone={zone_c} held={held}")
+            time.sleep(0.004)
+    finally:
+        set_key(False)
+    return True

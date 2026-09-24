@@ -1,3 +1,7 @@
 .env
 .venv
 __pycache__
+# local notes / artifacts
+GAME_NOTES.md
+*.mp4
+debug/

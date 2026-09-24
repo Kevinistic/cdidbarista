@@ -97,11 +97,21 @@ DIALOGUE_WORDS = ["Hi", "Halo", "like", "please", "pesan"]
 
 # ---------------------------------------------------------------- vision
 # Screen regions as fractions of the Roblox client area (measured at 1920x1172).
-PANEL_REGION = (0.80, 0.15, 1.00, 0.40)       # BARISTA quest panel, top right (never click its CANCEL)
-DIALOGUE_REGION = (0.25, 0.825, 0.75, 0.88)   # "Hi! I'd like a ... please." (one line)
-MODAL_REGION = (0.25, 0.20, 0.75, 0.85)       # cup picker / flavour picker
-WORLD_REGION = (0.19, 0.08, 1.00, 0.90)       # where world labels can show up
-HUD_BLOCK = (0.83, 0.00, 1.00, 0.37)          # panel, masked out of WORLD_REGION
+# shared parent (Roblox client viewport)
+PARENT_POS_X, PARENT_POS_Y = 0.0, 0.0
+PARENT_SIZE_X, PARENT_SIZE_Y = 1.0, 1.0
+
+# Regions laid out like Roblox GUI objects, scale-based and relative to the parent:
+# ((anchor_x, anchor_y), (pos_x, pos_y), (size_x, size_y))
+PANEL_REGION = ((1.0, 0.0), (1.0, 0.15), (0.20, 0.25))        # BARISTA panel (never click its CANCEL)
+DIALOGUE_REGION = ((0.5, 0.0), (0.5, 0.825), (0.50, 0.055))   # "Hi! I'd like a ... please." (one line)
+CONTINUE_REGION = ((0.5, 0.0), (0.5, 0.876), (0.20, 0.04))    # "click to continue" under it
+MODAL_REGION = ((0.5, 0.5), (0.5, 0.525), (0.50, 0.65))       # cup picker / flavour picker
+WORLD_REGION = ((0.0, 0.0), (0.19, 0.08), (0.81, 0.82))       # where world labels can show up
+HUD_BLOCK = ((1.0, 0.0), (1.0, 0.0), (0.17, 0.37))            # panel, masked out of WORLD_REGION
+
+CONTINUE_TEXTS = ["click to continue", "klik untuk lanjut"]
+CONTINUE_CUTOFF = 0.47
 
 # Target station label highlight (OpenCV HSV). Measured gold ~H20, S100-170, V>240.
 HIGHLIGHT_LO = (14, 80, 215)

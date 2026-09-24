@@ -144,7 +144,7 @@ def best_words(text, table, cutoff=0.75):
     """Like best_alias, but compares whole-word windows, so 'please' can't pass for 'Maple'."""
     words = [squash(w) for w in text.split()]
     words = [w for w in words if w]
-    best, best_score = None, cutoff
+    best, best_score, best_len = None, cutoff, 0
     for name, aliases in table.items():
         for alias in aliases:
             a = squash(alias)
@@ -153,8 +153,8 @@ def best_words(text, table, cutoff=0.75):
             for m in {max(1, n - 1), n, n + 1}:
                 for i in range(len(words) - m + 1):
                     score = max(score, difflib.SequenceMatcher(None, "".join(words[i:i + m]), a).ratio())
-            if score > best_score:
-                best, best_score = name, score
+            if score > best_score or (score == best_score and best and len(a) > best_len):
+                best, best_score, best_len = name, score, len(a)
     return best
 
 
@@ -231,17 +231,61 @@ def station_info(name):
 # (white prompt chips, white picker cards, gold labels, the red CANCEL button) and only the
 # recogniser runs, on single-line crops. The detector is kept for the landmark fallback.
 
-def frac_box(frac, W, H):
-    x0, y0, x1, y1 = frac
-    return int(x0 * W), int(y0 * H), int(x1 * W), int(y1 * H)
+def get_roblox_client_rect():
+    """Find Roblox window and return its exact INNER client viewport coordinates."""
+    import win32gui
+
+    def enum_windows_callback(hwnd, windows):
+        if win32gui.IsWindowVisible(hwnd):
+            title = win32gui.GetWindowText(hwnd)
+            if "roblox" in title.lower():
+                windows.append((hwnd, title))
+
+    windows = []
+    win32gui.EnumWindows(enum_windows_callback, windows)
+    if not windows:
+        return None
+    hwnd, title = windows[0]
+    client_rect = win32gui.GetClientRect(hwnd)
+    left, top = win32gui.ClientToScreen(hwnd, (0, 0))
+    return {
+        "hwnd": hwnd,
+        "title": title,
+        "left": left,
+        "top": top,
+        "width": client_rect[2] - client_rect[0],
+        "height": client_rect[3] - client_rect[1],
+    }
+
+
+def _parent_rect(W, H):
+    """Shared parent (the Roblox client viewport) in client pixels."""
+    return (W * config.PARENT_POS_X, H * config.PARENT_POS_Y,
+            W * config.PARENT_SIZE_X, H * config.PARENT_SIZE_Y)
+
+
+def region_box(region, W, H):
+    """Client-pixel box (x0, y0, x1, y1) of a Roblox-style ((anchor), (position), (size)) region."""
+    (ax, ay), (px, py), (sx, sy) = region
+    pl, pt, pw, ph = _parent_rect(W, H)
+    bw, bh = pw * sx, ph * sy
+    x0 = pl + pw * px - bw * ax
+    y0 = pt + ph * py - bh * ay
+    return int(x0), int(y0), int(x0 + bw), int(y0 + bh)
+
+
+def screen_region(window, region):
+    """The same region in absolute screen coordinates, as an mss grab dict."""
+    x0, y0, x1, y1 = region_box(region, window["width"], window["height"])
+    return {"left": window["left"] + x0, "top": window["top"] + y0, "width": x1 - x0, "height": y1 - y0}
 
 
 def world_mask(W, H):
     """255 where world labels / chips can be: excludes the HUD panels."""
     m = np.zeros((H, W), np.uint8)
-    x0, y0, x1, y1 = frac_box(config.WORLD_REGION, W, H)
+    x0, y0, x1, y1 = region_box(config.WORLD_REGION, W, H)
     m[y0:y1, x0:x1] = 255
-    x0, y0, x1, y1 = frac_box(config.HUD_BLOCK, W, H)
+    x0, y0, x1, y1 = region_box(config.HUD_BLOCK, W, H)
     m[y0:y1, x0:x1] = 0
     return m
 
@@ -293,7 +337,7 @@ def white_boxes(img, region, w_range, h_range, min_fill):
 def panel_text(img):
     """Instruction line(s) of the BARISTA panel, read just above its red CANCEL button."""
     H, W = img.shape[:2]
-    x0, y0, x1, y1 = frac_box(config.PANEL_REGION, W, H)
+    x0, y0, x1, y1 = region_box(config.PANEL_REGION, W, H)
     hsv = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2HSV)
     red = cv2.inRange(hsv, (0, 150, 150), (6, 255, 255)) | cv2.inRange(hsv, (174, 150, 150), (180, 255, 255))
     n, _, stats, _ = cv2.connectedComponentsWithStats(red)
@@ -315,11 +359,22 @@ def panel_text(img):
 def dialogue_text(img):
     """The customer's current line ('Hi! I'd like a ...'); may be junk when no dialogue is up."""
     H, W = img.shape[:2]
-    return read_white_text(img, frac_box(config.DIALOGUE_REGION, W, H))
+    return read_white_text(img, region_box(config.DIALOGUE_REGION, W, H))
 
 
 def is_dialogue(text):
     return any(fuzzy_in(text, w) >= 0.8 for w in config.DIALOGUE_WORDS) or parse_order(text)[0] is not None
+
+
+def continue_visible(img):
+    """'click to continue' / 'klik untuk lanjut' under the dialogue."""
+    H, W = img.shape[:2]
+    text, _ = read_line(img, region_box(config.CONTINUE_REGION, W, H), 3.0)
+    return max(whole_match(text, t) for t in config.CONTINUE_TEXTS) >= config.CONTINUE_CUTOFF
+
+
+def dialogue_up(img):
+    return continue_visible(img) or is_dialogue(dialogue_text(img))
 
 
 def highlight_mask(img):
@@ -381,7 +436,7 @@ def find_chips(img):
     """Every prompt chip on screen ('E' / 'Click' white box + action text to its right)."""
     H, W = img.shape[:2]
     wm = world_mask(W, H)
-    boxes = [b for b in white_boxes(img, frac_box(config.WORLD_REGION, W, H), (18, 110), (20, 42), 0.7)
+    boxes = [b for b in white_boxes(img, region_box(config.WORLD_REGION, W, H), (18, 110), (20, 42), 0.7)
              if wm[(b[1] + b[3]) // 2, (b[0] + b[2]) // 2]]
     chips = []
     for x0, y0, x1, y1 in boxes:
@@ -472,7 +527,7 @@ def find_landmark(img, landmarks):
     view = img.copy()
     view[world_mask(W, H) == 0] = 0
     best, best_score = None, config.MATCH_CUTOFF
-    for ln in lines(ocr(view, frac_box(config.WORLD_REGION, W, H), 0.5)):
+    for ln in lines(ocr(view, region_box(config.WORLD_REGION, W, H), 0.5)):
         whole = join(ln)
         score = max(fuzzy_in(whole.text, x) for x in landmarks)
         if score >= best_score:
@@ -484,7 +539,7 @@ def find_card(img, aliases):
     """Card in the cup / flavour picker whose label best matches aliases -> (x, y, text)."""
     H, W = img.shape[:2]
     best, best_score = None, 0.75
-    for x0, y0, x1, y1 in white_boxes(img, frac_box(config.MODAL_REGION, W, H), (90, 190), (100, 190), 0.6):
+    for x0, y0, x1, y1 in white_boxes(img, region_box(config.MODAL_REGION, W, H), (90, 190), (100, 190), 0.6):
         text, _ = read_line(img, (x0 + 2, y0 + 0.72 * (y1 - y0), x1 - 2, y1 - 2), 2.0)
         score = max(whole_match(text, a) for a in aliases)
         if score > best_score:
@@ -500,21 +555,18 @@ class Screen:
     def __init__(self):
         import mss
         self.sct = mss.mss()
+        self.window = None                # get_roblox_client_rect() result
         self.hwnd = None
-        self.rect = None
+        self.rect = None                  # (left, top, width, height) of the client area
 
     def find(self):
-        import win32gui
-        if not (self.hwnd and win32gui.IsWindow(self.hwnd) and win32gui.IsWindowVisible(self.hwnd)):
-            found = []
-            win32gui.EnumWindows(lambda h, acc: acc.append(h) if win32gui.IsWindowVisible(h)
-                                 and "roblox" in win32gui.GetWindowText(h).lower() else None, found)
-            self.hwnd = found[0] if found else None
-        if not self.hwnd:
+        self.window = get_roblox_client_rect()
+        if self.window is None or self.window["width"] <= 0 or self.window["height"] <= 0:
+            self.hwnd = self.rect = None
             return None
-        _, _, w, h = win32gui.GetClientRect(self.hwnd)
-        left, top = win32gui.ClientToScreen(self.hwnd, (0, 0))
-        self.rect = (left, top, w, h) if w > 0 and h > 0 else None
+        w = self.window
+        self.hwnd = w["hwnd"]
+        self.rect = (w["left"], w["top"], w["width"], w["height"])
         return self.rect
 
     def focused(self):
@@ -816,12 +868,13 @@ class Bot:
         """Click through the customer's lines and remember the order (it can't be asked again)."""
         self.say("listening to the order")
         H, W = self.scr.rect[3], self.scr.rect[2]
-        x0, y0, x1, y1 = frac_box(config.DIALOGUE_REGION, W, H)
+        x0, y0, x1, y1 = region_box(config.DIALOGUE_REGION, W, H)
         t0, blank, heard = time.time(), 0, False
         while time.time() - t0 < timeout:
             self.check(panel_every=0)
-            text = dialogue_text(self.grab())
-            if not is_dialogue(text):
+            img = self.grab()
+            text = dialogue_text(img)
+            if not (is_dialogue(text) or continue_visible(img)):
                 blank += 1
                 if blank >= 4 and (heard or time.time() - t0 > 4):
                     break
@@ -884,7 +937,7 @@ class Bot:
     def do(self, step):
         self.step, self._last_check = step, time.time()
         self.status.step = str(step)
-        if is_dialogue(dialogue_text(self.grab())):      # the customer is still talking
+        if dialogue_up(self.grab()):                     # the customer is still talking
             self.read_order()
         drink, syrup = self.order or (None, None)
 
@@ -957,7 +1010,7 @@ class Bot:
                     self.step = None
                     self.status.step = "-"
                     # a dialogue left open (e.g. we asked but missed the reply)?
-                    if is_dialogue(dialogue_text(self.grab())):
+                    if dialogue_up(self.grab()):
                         self.read_order()
                     elif time.time() - idle_since > 5:
                         self.say("can't read the BARISTA panel (is the job started?)")

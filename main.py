@@ -1,9 +1,10 @@
 """CDID barista bot.
 
-Reads the BARISTA quest panel and does what it says: holds the right arrow until the gold
-highlighted station label is on screen, walks at it until the prompt chip under it shows up,
-then clicks that chip. The customer and the bin aren't highlighted, so those are found by OCR
-on their chip text. Cup / flavour pickers are clicked by OCR, the shot minigame is coffee.py.
+Reads the BARISTA quest panel and does what it says: turns in steps until the target station
+is on screen (its gold chevron first, OCR of the label text when there's none), walks at it in
+bursts until the prompt chip under it shows up, then holds E / holds a click on that chip. The
+customer isn't highlighted, so it's found by OCR on its chip text. Cup / flavour pickers are
+clicked by OCR, the shot minigame is coffee.py.
 
     python main.py                 run the bot (F6 pause/resume, F7 quit)
     python main.py --test a.png    run the vision on screenshots, annotated copies go to debug/
@@ -16,151 +17,22 @@ import random
 import re
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import cv2
 import numpy as np
 
 import coffee
 import config
+from ocr import (REF_H, best_alias, fuzzy_in, read_line, read_white_text, reader,
+                 region_box, squash, white_boxes)
 
 try:  # per-monitor DPI awareness so screen pixels match win32 coordinates 1:1
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
 except Exception:
     ctypes.windll.user32.SetProcessDPIAware()
 
-REF_H = 1172          # client height the pixel constants below were measured at
 DEBUG_DIR = "debug"
-
-
-# ================================================================ OCR + text matching
-
-_reader = None
-ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!?,.'#:-() "
-
-
-def reader():
-    """EasyOCR (CRAFT detector + CRNN recogniser), loaded once on first use."""
-    global _reader
-    if _reader is None:
-        import easyocr
-        import torch
-        _reader = easyocr.Reader(["en"], gpu=torch.cuda.is_available(), verbose=False)
-    return _reader
-
-
-@dataclass
-class Word:
-    text: str
-    box: tuple            # x0, y0, x1, y1 in client pixels
-
-    @property
-    def cx(self):
-        return (self.box[0] + self.box[2]) / 2
-
-    @property
-    def cy(self):
-        return (self.box[1] + self.box[3]) / 2
-
-    @property
-    def h(self):
-        return self.box[3] - self.box[1]
-
-
-def ocr(img, box=None, scale=1.0):
-    """Words in img (or in the client-pixel box of it), with boxes in img coordinates."""
-    x0, y0 = (box[0], box[1]) if box else (0, 0)
-    crop = img[box[1]:box[3], box[0]:box[2]] if box else img
-    if crop.size == 0:
-        return []
-    if scale != 1.0:
-        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    words = []
-    for pts, text, conf in reader().readtext(crop, detail=1, paragraph=False,
-                                             allowlist=ALLOWLIST, width_ths=0.3):
-        if conf < config.OCR_MIN_CONF or not text.strip():
-            continue
-        xs, ys = [p[0] for p in pts], [p[1] for p in pts]
-        words.append(Word(text.strip(), (x0 + min(xs) / scale, y0 + min(ys) / scale,
-                                         x0 + max(xs) / scale, y0 + max(ys) / scale)))
-    return words
-
-
-def lines(words):
-    """Group words into text lines: same row and nearly touching, left to right."""
-    out = []
-    for w in sorted(words, key=lambda w: w.box[0]):
-        for ln in out:
-            last = ln[-1]
-            h = max(w.h, last.h)
-            if abs(w.cy - last.cy) < 0.5 * h and -0.5 * h < w.box[0] - last.box[2] < 1.0 * h:
-                ln.append(w)
-                break
-        else:
-            out.append([w])
-    return sorted(out, key=lambda ln: (ln[0].cy, ln[0].box[0]))
-
-
-def join(ln):
-    """A line of words as one Word."""
-    return Word(" ".join(w.text for w in ln),
-                (min(w.box[0] for w in ln), min(w.box[1] for w in ln),
-                 max(w.box[2] for w in ln), max(w.box[3] for w in ln)))
-
-
-def squash(s):
-    return re.sub(r"[^a-z0-9]", "", s.lower())
-
-
-def fuzzy_in(text, phrase):
-    """How well phrase appears somewhere in text, 0..1. Short phrases must match a whole word."""
-    t, p = squash(text), squash(phrase)
-    if not t or not p:
-        return 0.0
-    if len(p) <= 4:                     # one OCR slip allowed ("Hil" for "Hi")
-        r = max((difflib.SequenceMatcher(None, squash(w), p).ratio() for w in text.split()), default=0.0)
-        return r if r >= 0.8 else 0.0
-    if p in t:
-        return 1.0
-    best = 0.0
-    for n in {len(p) - 1, len(p), len(p) + 1}:
-        for i in range(max(1, len(t) - n + 1)):
-            best = max(best, difflib.SequenceMatcher(None, t[i:i + n], p).ratio())
-    return best
-
-
-def best_alias(text, table, cutoff=None):
-    """table {canonical: [aliases]} -> canonical whose alias best appears in text, or None."""
-    cutoff = config.MATCH_CUTOFF if cutoff is None else cutoff
-    best, best_score = None, cutoff
-    for name, aliases in table.items():
-        score = max(fuzzy_in(text, a) for a in aliases)
-        if score > best_score or (score == best_score == 1.0 and best and len(name) > len(best)):
-            best, best_score = name, score
-    return best
-
-
-def best_words(text, table, cutoff=0.75):
-    """Like best_alias, but compares whole-word windows, so 'please' can't pass for 'Maple'."""
-    words = [squash(w) for w in text.split()]
-    words = [w for w in words if w]
-    best, best_score, best_len = None, cutoff, 0
-    for name, aliases in table.items():
-        for alias in aliases:
-            a = squash(alias)
-            n = len(alias.split())
-            score = 1.0 if a in "".join(words) and len(a) > 4 else 0.0
-            for m in {max(1, n - 1), n, n + 1}:
-                for i in range(len(words) - m + 1):
-                    score = max(score, difflib.SequenceMatcher(None, "".join(words[i:i + m]), a).ratio())
-            if score > best_score or (score == best_score and best and len(a) > best_len):
-                best, best_score, best_len = name, score, len(a)
-    return best
-
-
-def whole_match(text, phrase):
-    """Similarity of a whole line to a phrase (card labels, where substrings would lie)."""
-    return difflib.SequenceMatcher(None, squash(text), squash(phrase)).ratio()
 
 
 # ================================================================ panel / dialogue parsing
@@ -206,21 +78,6 @@ def parse_panel(text):
     return Step("station", action or action_txt.title(), station, raw=text)
 
 
-def parse_order(text):
-    """Customer line -> (drink, syrup); either may be None."""
-    drink = best_words(text, config.MENU)
-    syrup = best_words(text, {s: [s] for s in config.SYRUPS})
-    return drink, syrup
-
-
-def recipe_plan(drink, syrup):
-    """'Espresso > Milk > Maple > Ice' for the overlay."""
-    steps = []
-    for s in config.RECIPES.get(drink, []):
-        steps.append((syrup or "?") if s == "Flavour" else s)
-    return " > ".join(steps)
-
-
 def station_info(name):
     info = config.STATIONS.get(name)
     return (info["names"], info["prompts"]) if info else ([name], [])
@@ -258,22 +115,6 @@ def get_roblox_client_rect():
     }
 
 
-def _parent_rect(W, H):
-    """Shared parent (the Roblox client viewport) in client pixels."""
-    return (W * config.PARENT_POS_X, H * config.PARENT_POS_Y,
-            W * config.PARENT_SIZE_X, H * config.PARENT_SIZE_Y)
-
-
-def region_box(region, W, H):
-    """Client-pixel box (x0, y0, x1, y1) of a Roblox-style ((anchor), (position), (size)) region."""
-    (ax, ay), (px, py), (sx, sy) = region
-    pl, pt, pw, ph = _parent_rect(W, H)
-    bw, bh = pw * sx, ph * sy
-    x0 = pl + pw * px - bw * ax
-    y0 = pt + ph * py - bh * ay
-    return int(x0), int(y0), int(x0 + bw), int(y0 + bh)
-
-
 def screen_region(window, region):
     """The same region in absolute screen coordinates, as an mss grab dict."""
     x0, y0, x1, y1 = region_box(region, window["width"], window["height"])
@@ -285,53 +126,10 @@ def world_mask(W, H):
     m = np.zeros((H, W), np.uint8)
     x0, y0, x1, y1 = region_box(config.WORLD_REGION, W, H)
     m[y0:y1, x0:x1] = 255
-    x0, y0, x1, y1 = region_box(config.HUD_BLOCK, W, H)
-    m[y0:y1, x0:x1] = 0
+    for block in (config.HUD_BLOCK, config.TOPBAR_BLOCK):
+        x0, y0, x1, y1 = region_box(block, W, H)
+        m[y0:y1, x0:x1] = 0
     return m
-
-
-def read_line(img, box, scale=2.0):
-    """Recognise one line of text in box -> (text, confidence). No detector, so it's fast."""
-    H, W = img.shape[:2]
-    x0, y0, x1, y1 = max(0, int(box[0])), max(0, int(box[1])), min(W, int(box[2])), min(H, int(box[3]))
-    if x1 - x0 < 4 or y1 - y0 < 4:
-        return "", 0.0
-    crop = img[y0:y1, x0:x1]
-    if crop.ndim == 3:
-        crop = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-    if scale != 1.0:
-        crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    h, w = crop.shape
-    res = reader().recognize(crop, horizontal_list=[[0, w, 0, h]], free_list=[],
-                             detail=1, allowlist=ALLOWLIST)
-    if not res:
-        return "", 0.0
-    return res[0][1].strip(), float(res[0][2])
-
-
-def read_white_text(img, box):
-    """World text is white with a dark outline: keep only the white fill, as black on white."""
-    x0, y0, x1, y1 = (int(v) for v in box)
-    crop = img[max(0, y0):y1, max(0, x0):x1]
-    if crop.size == 0:
-        return ""
-    ink = 255 - cv2.inRange(crop, (245, 245, 245), (255, 255, 255))
-    return read_line(ink, (0, 0, ink.shape[1], ink.shape[0]), 2.0)[0]
-
-
-def white_boxes(img, region, w_range, h_range, min_fill):
-    """Pure-white UI boxes (chips, cards) inside region; sizes in pixels at REF_H."""
-    H, W = img.shape[:2]
-    k = H / REF_H
-    x0, y0, x1, y1 = region
-    m = cv2.inRange(img[y0:y1, x0:x1], (250, 250, 250), (255, 255, 255))
-    n, _, stats, _ = cv2.connectedComponentsWithStats(m)
-    out = []
-    for x, y, w, h, area in stats[1:]:
-        if w_range[0] * k <= w <= w_range[1] * k and h_range[0] * k <= h <= h_range[1] * k \
-                and area >= min_fill * w * h:
-            out.append((int(x + x0), int(y + y0), int(x + x0 + w), int(y + y0 + h)))
-    return out
 
 
 def panel_text(img):
@@ -348,33 +146,22 @@ def panel_text(img):
     bx, by, bw, bh, _ = max(buttons, key=lambda s: s[4])
     bx, by = bx + x0, by + y0
     u = bh / 40                          # the button is 40 px tall at 1920x1172
-    texts = []
-    for top, bottom in ((-62, -40), (-42, -18)):     # up to two instruction lines
-        text, conf = read_line(img, (bx - 4 * u, by + top * u, bx + bw + 4 * u, by + bottom * u))
-        if conf >= 0.2 and len(squash(text)) >= 3:
-            texts.append(text)
-    return " ".join(texts)
 
+    def read(src):
+        texts = []
+        for top, bottom in ((-62, -40), (-42, -18)):     # up to two instruction lines
+            text, conf = read_line(src, (bx - 4 * u, by + top * u, bx + bw + 4 * u, by + bottom * u))
+            if conf >= 0.2 and len(squash(text)) >= 3:
+                texts.append(text)
+        return " ".join(texts)
 
-def dialogue_text(img):
-    """The customer's current line ('Hi! I'd like a ...'); may be junk when no dialogue is up."""
-    H, W = img.shape[:2]
-    return read_white_text(img, region_box(config.DIALOGUE_REGION, W, H))
-
-
-def is_dialogue(text):
-    return any(fuzzy_in(text, w) >= 0.8 for w in config.DIALOGUE_WORDS) or parse_order(text)[0] is not None
-
-
-def continue_visible(img):
-    """'click to continue' / 'klik untuk lanjut' under the dialogue."""
-    H, W = img.shape[:2]
-    text, _ = read_line(img, region_box(config.CONTINUE_REGION, W, H), 3.0)
-    return max(whole_match(text, t) for t in config.CONTINUE_TEXTS) >= config.CONTINUE_CUTOFF
-
-
-def dialogue_up(img):
-    return continue_visible(img) or is_dialogue(dialogue_text(img))
+    text = read(img)
+    if parse_panel(text) is None:
+        # the panel is see-through: a red sign behind it wrecks the plain read, so keep only
+        # the light unsaturated text as black on white
+        mask = cv2.inRange(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), (0, 0, 170), (180, 70, 255))
+        text = read(cv2.cvtColor(255 - mask, cv2.COLOR_GRAY2BGR)) or text
+    return text
 
 
 def highlight_mask(img):
@@ -411,6 +198,44 @@ def read_label(img, box, mask=None):
     return read_line(crop, (0, 0, crop.shape[1], crop.shape[0]), 1.0)[0]
 
 
+def find_chevrons(img, mask=None):
+    """Gold chevrons (the marker over the target's label) as (x0, y0, x1, y1): a fixed-size V,
+    wide at the top and narrow at the bottom."""
+    H = img.shape[0]
+    k = H / REF_H
+    m = highlight_mask(img) if mask is None else mask
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(m)
+    out = []
+    for i, (x, y, w, h, area) in enumerate(stats[1:], 1):
+        if not (35 * k <= w <= 58 * k and 17 * k <= h <= 32 * k and 0.25 <= area / (w * h) <= 0.65):
+            continue
+        blob = labels[y:y + h, x:x + w] == i
+        mid = slice(w // 2 - 2, w // 2 + 3)
+        hollow_top = blob[:h // 3, mid].mean() < 0.1 and blob[:h // 3, :w // 4].any() and blob[:h // 3, -(w // 4):].any()
+        solid_point = blob[int(.6 * h):int(.9 * h), mid].mean() > 0.7
+        cols = np.flatnonzero(blob[int(.8 * h):].any(axis=0))
+        if hollow_top and solid_point and len(cols) and cols[-1] - cols[0] < 0.6 * w:
+            out.append((int(x), int(y), int(x + w), int(y + h)))
+    return out
+
+
+def chevron_target(img, chevron, mask):
+    """Target for the label under a chevron: the gold pixels just below it (partly hidden
+    under other labels is fine), or a box where the label should be."""
+    H = img.shape[0]
+    k = H / REF_H
+    cx0, cy0, cx1, cy1 = chevron
+    cx = (cx0 + cx1) // 2
+    x0, y0, x1, y1 = int(cx - 220 * k), int(cy1 + 15 * k), int(cx + 220 * k), int(cy1 + 75 * k)
+    ys, xs = np.nonzero(mask[max(0, y0):y1, max(0, x0):x1])
+    if len(xs) > 30:
+        box = (max(0, x0) + int(xs.min()), max(0, y0) + int(ys.min()),
+               max(0, x0) + int(xs.max()), max(0, y0) + int(ys.max()))
+    else:
+        box = (int(cx - 80 * k), int(cy1 + 35 * k), int(cx + 80 * k), int(cy1 + 60 * k))
+    return Target(box)
+
+
 @dataclass
 class Chip:
     x: int
@@ -441,13 +266,17 @@ def find_chips(img):
     chips = []
     for x0, y0, x1, y1 in boxes:
         inner = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-        h = y1 - y0
-        edges = inner[[int(.15 * h), int(.85 * h)], int(.2 * (x1 - x0)):int(.8 * (x1 - x0)) + 1]
-        if not 0.03 <= np.mean(inner < 100) <= 0.4 or np.mean(edges >= 245) < 0.75:
-            continue                # a chip is a solid white box with dark key text in the middle
+        h, w = y1 - y0, x1 - x0
+        edges = inner[[int(.15 * h), int(.85 * h)], int(.2 * w):int(.8 * w) + 1]
+        sides = np.concatenate([inner[int(.15 * h):int(.85 * h), int(.05 * w):int(.12 * w) + 1],
+                                inner[int(.15 * h):int(.85 * h), int(.88 * w):int(.95 * w) + 1]], axis=1)
+        if not 0.03 <= np.mean(inner < 100) <= 0.4 or np.mean(edges >= 245) < 0.75                 or np.mean(sides >= 245) < 0.85:
+            continue                # a chip is a white box with its dark key text centred (a "B" isn't)
         # the action text runs right until the next chip on the same row, whose left edge is a
         # solid white column even when it touches this text and wasn't found as its own box
         end = min([b[0] for b in boxes if b[0] > x1 and abs(b[1] - y0) < h] + [x1 + 12 * h, W])
+        if end - x1 < h:
+            continue                # at the screen edge: no text to check it against
         strip = cv2.inRange(img[y0 + h // 4:y1 - h // 4, x1 + h // 2:int(end)], (250, 250, 250), (255, 255, 255))
         if strip.size:
             solid = (strip.min(axis=0) == 255).astype(np.uint8)
@@ -461,24 +290,39 @@ def find_chips(img):
     return chips
 
 
-def find_station_label(img, names, near=None):
-    """Gold label of the target station. With near (a previous Target) it just tracks the
-    candidate closest to it without OCR; otherwise each candidate is OCR-confirmed."""
-    m = highlight_mask(img)
-    boxes = find_labels(img, m)
-    if not boxes:
-        return None
-    if near is not None:
-        b = min(boxes, key=lambda b: abs((b[0] + b[2]) / 2 - near.cx) + abs(b[1] - near.box[1]))
-        if abs((b[0] + b[2]) / 2 - near.cx) < 0.25 * img.shape[1]:
-            return Target(b, near.text)
-        return None
-    for b in boxes[:4]:
-        text = read_label(img, b, m)
-        if max(fuzzy_in(text, n) for n in names) >= config.MATCH_CUTOFF:
-            return Target(b, text)
-        if config.DEBUG:
-            print(f"[label] rejected {text!r} at {b}")
+def white_mask(img):
+    """White label fill (the cup rack, bin and customers' stations aren't highlighted)."""
+    H, W = img.shape[:2]
+    return cv2.inRange(img, (245, 245, 245), (255, 255, 255)) & world_mask(W, H)
+
+
+def find_station_label(img, names, near=None, chevron=True):
+    """Label of the target station. 1) The gold chevron (only the target has one, and OCR
+    misreads labels drawn over each other). 2) No chevron: OCR the gold, then the white labels.
+    With near (a previous Target) only the candidates close to it are read, but still read:
+    tracking by position alone drifted onto the Boba Pot next to the Cup Rack."""
+    W = img.shape[1]
+    gold = highlight_mask(img)
+    if chevron:
+        chevrons = find_chevrons(img, gold)
+        if near is not None and chevrons:
+            chevrons = [min(chevrons, key=lambda c: abs((c[0] + c[2]) / 2 - near.cx))]
+        if len(chevrons) == 1:
+            return Target(chevron_target(img, chevrons[0], gold).box, names[0])
+    others = [n for st in config.STATIONS.values() for n in st["names"] if n not in names]
+    for m, limit in ((gold, 4), (white_mask(img), 12)):
+        boxes = find_labels(img, m)
+        if near is not None:
+            boxes = sorted((b for b in boxes if abs((b[0] + b[2]) / 2 - near.cx) < 0.25 * W),
+                           key=lambda b: abs((b[0] + b[2]) / 2 - near.cx) + abs(b[1] - near.box[1]))
+            limit = 2
+        for b in boxes[:limit]:
+            text = read_label(img, b, m)
+            match = max(fuzzy_in(text, n) for n in names)
+            if match >= config.MATCH_CUTOFF and match > max((fuzzy_in(text, n) for n in others), default=0):
+                return Target(b, text)
+            if config.DEBUG:
+                print(f"[label] rejected {text!r} at {b}")
     return None
 
 
@@ -487,8 +331,10 @@ def other_phrases(phrases):
     known = [p for st in config.STATIONS.values() for p in st["prompts"]]
     known += [a for aliases in config.ACTIONS.values() for a in aliases]
     known += config.ASK_PROMPTS + config.SERVE_PROMPTS
+    known += [n for st in config.STATIONS.values() for n in st["names"]]
     own = {squash(p) for p in phrases}
-    return [p for p in known if squash(p) not in own]
+    # also drop parts of our own phrases: the name "Milk" would out-match "Pour the Milk"
+    return [p for p in known if not any(squash(p) in o for o in own)]
 
 
 def find_chip(img, label, phrases, chips=None):
@@ -499,11 +345,14 @@ def find_chip(img, label, phrases, chips=None):
     others = other_phrases(phrases)
     best, best_score = None, 0.0
     for chip in find_chips(img) if chips is None else chips:
-        if not y1 - 0.3 * h <= chip.box[1] <= y1 + 3 * h or not x0 - 0.5 * w <= chip.x <= x1:
+        # the key box sits left of centre under the label: ~35 px past a short one like "Milk"
+        if not y1 - 0.3 * h <= chip.box[1] <= y1 + 3 * h or not x0 - max(0.5 * w, 3 * h) <= chip.x <= x1:
             continue
         match = max((fuzzy_in(chip.text, p) for p in phrases), default=0.0)
         other = max((fuzzy_in(chip.text, p) for p in others), default=0.0)
         if match < config.MATCH_CUTOFF or match <= other:
+            if config.DEBUG:
+                print(f"[chip] under {label.text!r}: rejected {chip.key} {chip.text!r} ({match:.2f} vs {other:.2f})")
             continue
         score = match - 0.2 * abs(chip.x - label.cx) / max(w, 1)
         if score > best_score:
@@ -513,38 +362,48 @@ def find_chip(img, label, phrases, chips=None):
 
 def find_prompt(img, prompts):
     """A chip anywhere on screen whose text matches one of prompts -> Target."""
+    others = other_phrases(prompts)
     best, best_score = None, config.MATCH_CUTOFF
     for chip in find_chips(img):
         score = max(fuzzy_in(chip.text, p) for p in prompts)
-        if score >= best_score:
+        if score >= best_score and score > max(fuzzy_in(chip.text, p) for p in others):
             best, best_score = Target(chip.box, chip.text, chip), score
     return best
 
 
-def find_landmark(img, landmarks):
-    """Slow path: detector OCR at half resolution for a big white station label."""
-    H, W = img.shape[:2]
-    view = img.copy()
-    view[world_mask(W, H) == 0] = 0
-    best, best_score = None, config.MATCH_CUTOFF
-    for ln in lines(ocr(view, region_box(config.WORLD_REGION, W, H), 0.5)):
-        whole = join(ln)
-        score = max(fuzzy_in(whole.text, x) for x in landmarks)
-        if score >= best_score:
-            best, best_score = Target(tuple(int(v) for v in whole.box), whole.text), score
-    return best
+def customer_name(img, chip):
+    """Display name of the customer a chip belongs to: the small white name tag at the fixed
+    offset from the chip where the asked customer's tag sat (other players stand close by)."""
+    k = img.shape[0] / REF_H
+    ex, ey = chip.box[0] + config.NAME_TAG_OFFSET[0] * k, chip.box[1] - config.NAME_TAG_OFFSET[1] * k
+    m = white_mask(img)
+    tags = [b for b in name_tags(img, m) if abs((b[0] + b[2]) / 2 - ex) + abs(b[3] - ey) < 80 * k]
+    if not tags:
+        return None
+    b = min(tags, key=lambda b: abs((b[0] + b[2]) / 2 - ex) + abs(b[3] - ey))
+    name = read_label(img, b, m).strip()
+    stations = [n for st in config.STATIONS.values() for n in st["names"]]
+    if len(squash(name)) >= 2 and max(fuzzy_in(name, s) for s in stations) < config.MATCH_CUTOFF:
+        return name
+    return None
 
 
-def find_card(img, aliases):
-    """Card in the cup / flavour picker whose label best matches aliases -> (x, y, text)."""
-    H, W = img.shape[:2]
-    best, best_score = None, 0.75
-    for x0, y0, x1, y1 in white_boxes(img, region_box(config.MODAL_REGION, W, H), (90, 190), (100, 190), 0.6):
-        text, _ = read_line(img, (x0 + 2, y0 + 0.72 * (y1 - y0), x1 - 2, y1 - 2), 2.0)
-        score = max(whole_match(text, a) for a in aliases)
-        if score > best_score:
-            best, best_score = ((x0 + x1) // 2, (y0 + y1) // 2, text), score
-    return best
+def name_tags(img, m=None):
+    """Small white player name tags (display names), widest first."""
+    k = img.shape[0] / REF_H
+    m = white_mask(img) if m is None else m
+    return [b for b in find_labels(img, m) if b[3] - b[1] <= 22 * k and b[2] - b[0] <= 220 * k]
+
+
+def find_landmark(img, landmarks, customer=None):
+    """What to walk toward when no prompt is in reach: the remembered customer's name tag,
+    else a big white station label."""
+    if customer:
+        m = white_mask(img)
+        for b in name_tags(img, m)[:10]:
+            if fuzzy_in(read_label(img, b, m), customer) >= config.MATCH_CUTOFF:
+                return Target(b, customer)
+    return find_station_label(img, landmarks, chevron=False)     # a chevron there marks something else
 
 
 # ================================================================ screen + input
@@ -585,7 +444,7 @@ class Screen:
 
 
 # Native SendInput: Roblox only registers hover/click from hardware-style events.
-INPUT_MOUSE, MOVE, LEFTDOWN, LEFTUP, ABSOLUTE = 0, 0x0001, 0x0002, 0x0004, 0x8000
+INPUT_MOUSE, MOVE, LEFTDOWN, LEFTUP, VIRTUALDESK, ABSOLUTE = 0, 0x0001, 0x0002, 0x0004, 0x4000, 0x8000
 ULONG_PTR = ctypes.c_ulong if ctypes.sizeof(ctypes.c_void_p) == 4 else ctypes.c_ulonglong
 
 
@@ -594,23 +453,44 @@ class MOUSEINPUT(ctypes.Structure):
                 ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong), ("dwExtraInfo", ULONG_PTR)]
 
 
+class KEYBDINPUT(ctypes.Structure):
+    _fields_ = [("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort), ("dwFlags", ctypes.c_ulong),
+                ("time", ctypes.c_ulong), ("dwExtraInfo", ULONG_PTR)]
+
+
 class INPUT(ctypes.Structure):
     class _U(ctypes.Union):
-        _fields_ = [("mi", MOUSEINPUT)]
+        _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT)]
     _fields_ = [("type", ctypes.c_ulong), ("u", _U)]
+
+
+# Keys go out as scancodes; arrows need the extended flag or Roblox reads them as numpad keys.
+SCANCODES = {"w": 0x11, "a": 0x1E, "s": 0x1F, "d": 0x20, "e": 0x12, "space": 0x39,
+             "up": (0x48, True), "down": (0x50, True), "left": (0x4B, True), "right": (0x4D, True)}
+
+
+def send_key(key, down):
+    code = SCANCODES[key]
+    scan, extended = code if isinstance(code, tuple) else (code, False)
+    inp = INPUT(1)
+    inp.u.ki = KEYBDINPUT(0, scan, 0x0008 | (0 if down else 0x0002) | (0x0001 if extended else 0), 0, 0)
+    ctypes.windll.user32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
 
 def _mouse(flags, x, y):
     u32 = ctypes.windll.user32
-    ax = int(x * 65535 / max(1, u32.GetSystemMetrics(0) - 1))
-    ay = int(y * 65535 / max(1, u32.GetSystemMetrics(1) - 1))
+    # normalise over the whole virtual desktop, so Roblox on a second monitor works
+    vx, vy, vw, vh = (u32.GetSystemMetrics(i) for i in (76, 77, 78, 79))
+    ax = int((x - vx) * 65535 / max(1, vw - 1))
+    ay = int((y - vy) * 65535 / max(1, vh - 1))
     inp = INPUT(INPUT_MOUSE)
-    inp.u.mi = MOUSEINPUT(ax, ay, 0, flags | ABSOLUTE, 0, u32.GetMessageExtraInfo())
+    inp.u.mi = MOUSEINPUT(ax, ay, 0, flags | ABSOLUTE | VIRTUALDESK, 0, u32.GetMessageExtraInfo())
     u32.SendInput(1, ctypes.byref(inp), ctypes.sizeof(inp))
 
 
-def click(x, y):
-    """Glide the cursor to screen (x, y) so Roblox registers the hover, then left click."""
+def click(x, y, hold=0.02):
+    """Glide the cursor to screen (x, y) so Roblox registers the hover, then left click
+    (prompt chips need the button held, like E)."""
     import win32api
     sx, sy = win32api.GetCursorPos()
     steps = max(3, min(int(((x - sx) ** 2 + (y - sy) ** 2) ** 0.5) // 30, 12))
@@ -623,7 +503,7 @@ def click(x, y):
     _mouse(MOVE, x, y)
     time.sleep(0.02)
     _mouse(LEFTDOWN, x, y)
-    time.sleep(0.02)
+    time.sleep(hold)
     _mouse(LEFTUP, x, y)
 
 
@@ -640,6 +520,10 @@ class Status:
     order: str = "-"
     plan: str = ""
     paused: bool = False
+    route: list = field(default_factory=lambda: coffee.route(None, None))    # (key, label) per panel step
+    customer: str = None
+    current: str = None       # key of the step being worked on ("bin" while binning a ruined drink)
+    served: int = 0
 
 
 class Bot:
@@ -648,8 +532,10 @@ class Bot:
         self.status = Status()
         self.held = set()
         self.order = None                 # (drink, syrup) of the current customer
+        self.customer = None              # their name tag, remembered to find them again for serving
         self.step = None                  # Step being worked on
         self.fails = {}                   # step key -> attempts without progress
+        self.stuck_count = 0              # unstick() attempts, grows the sideways slide
         self._last_check = 0.0
         self.scr = None
 
@@ -678,15 +564,13 @@ class Bot:
                 raise Abort(f"panel now says {step}")
 
     def hold(self, key):
-        import keyboard
         if key not in self.held:
-            keyboard.press(key)
+            send_key(key, True)
             self.held.add(key)
 
     def release(self, key):
-        import keyboard
         if key in self.held:
-            keyboard.release(key)
+            send_key(key, False)
             self.held.discard(key)
 
     def release_all(self):
@@ -701,8 +585,8 @@ class Bot:
     def grab(self):
         return self.scr.grab()
 
-    def click_client(self, x, y):
-        click(*self.scr.to_screen(x, y))
+    def click_client(self, x, y, hold=0.02):
+        click(*self.scr.to_screen(x, y), hold)
 
     def debug_save(self, img, name, boxes=()):
         if not config.DEBUG:
@@ -726,7 +610,8 @@ class Bot:
     def set_order(self, drink, syrup):
         self.order = (drink, syrup)
         self.status.order = " + ".join(p for p in (drink, syrup) if p) or "-"
-        self.status.plan = recipe_plan(drink, syrup)
+        self.status.plan = coffee.recipe_plan(drink, syrup)
+        self.status.route = coffee.route(drink, syrup)
 
     # ---------------------------------------------------------- navigation
     def scan(self, locate, slow):
@@ -736,11 +621,9 @@ class Bot:
         try:
             while time.time() - t0 < config.SEEK_TIMEOUT:
                 self.check()
-                if slow:            # OCR is slow: turn in steps so frames aren't smeared
-                    self.tap(config.TURN_RIGHT, config.SCAN_STEP)
-                    time.sleep(0.08)
-                else:
-                    self.hold(config.TURN_RIGHT)
+                # turn in steps and look while still: holding the key kept turning past the target
+                self.tap(config.TURN_RIGHT, config.SCAN_STEP if slow else config.FAST_SCAN_STEP)
+                time.sleep(0.12)
                 target = locate(self.grab(), None)
                 if target is not None:
                     return target
@@ -771,17 +654,14 @@ class Bot:
                     return chip
 
                 err = 0.0 if target.stale else (target.cx - W / 2) / W
-                turn = config.TURN_RIGHT if err > 0 else config.TURN_LEFT
                 if abs(err) > config.CENTER_TOL:
-                    self.release(config.FORWARD)
-                    self.tap(turn, min(0.3, abs(err) * config.STEER_GAIN))
+                    self.steer(err)
                     continue
-                if slow:
-                    self.tap(config.FORWARD, config.WALK_BURST)
-                else:
-                    self.hold(config.FORWARD)
+                # walk in bursts and look while stopped: holding W walked past the chip
+                self.tap(config.FORWARD, config.WALK_BURST)
+                time.sleep(0.1)
                 if abs(err) > config.STEER_TOL:
-                    self.tap(turn, abs(err) * config.STEER_GAIN)
+                    self.steer(err)
 
                 thumb = cv2.cvtColor(cv2.resize(img, (64, 40), interpolation=cv2.INTER_AREA),
                                      cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -794,20 +674,33 @@ class Bot:
             self.release(config.FORWARD)
         return None
 
+    def steer(self, err):
+        """Fine turn pulses toward an offset (fraction of width): longer taps accelerate and overshoot."""
+        turn = config.TURN_RIGHT if err > 0 else config.TURN_LEFT
+        for _ in range(max(1, min(config.MAX_PULSES, round(abs(err) / config.TURN_PULSE)))):
+            self.tap(turn, config.TURN_TAP)
+            time.sleep(0.08)
+        time.sleep(0.1)
+
     def unstick(self):
-        self.say("stuck, backing off")
+        """Walking into a wall (labels show through walls): back off and slide sideways, a
+        little further and on the other side each time, to find the way around."""
+        self.stuck_count += 1
+        side = config.STRAFE_LEFT if self.stuck_count % 2 else config.STRAFE_RIGHT
+        self.say(f"stuck, backing off and strafing {side}")
         self.release_all()
-        self.tap(config.BACK, 0.4)
-        self.tap(random.choice([config.STRAFE_LEFT, config.STRAFE_RIGHT]), 0.5)
-        self.tap(config.JUMP, 0.1)
+        self.tap(config.BACK, 0.5)
+        self.tap(side, min(0.6 + 0.4 * self.stuck_count, 2.5))     # no jump: it lands on the counter
 
     def wander(self):
-        """Nothing found after a full turn: walk somewhere else and look again."""
-        self.say("nothing in view, wandering")
-        self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.6))
-        self.tap(config.FORWARD, random.uniform(0.8, 1.5))
+        """Nothing found after a full turn: back up for a wider view (walking forward at random
+        led into side rooms) and look again."""
+        self.say("nothing in view, backing up")
+        self.tap(config.BACK, random.uniform(0.5, 1.0))
+        self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
 
-    def goto_station(self, name, phrases):
+    def goto_station(self, name, phrases, slow=False):
+        """slow: usually found by text, not a chevron (cup rack, bin), so scan in OCR-sized steps."""
         names, prompts = station_info(name)
         phrases = list(phrases) + prompts
 
@@ -817,9 +710,31 @@ class Bot:
         def chip_near(img, target):
             return find_chip(img, target, phrases)
 
-        return self.navigate(locate, chip_near, slow=False)
+        def recheck(img):
+            label = find_station_label(img, names)
+            return find_chip(img, label, phrases) if label else None
 
-    def goto_text(self, prompts, landmarks):
+        return self.settled(self.navigate(locate, chip_near, slow=slow), recheck)
+
+    def goto_text(self, prompts, landmarks, customer=None):
+        def recheck(img):
+            target = find_prompt(img, prompts)
+            return target.chip if target else None
+
+        return self.settled(self._goto_text(prompts, landmarks, customer), recheck)
+
+    def settled(self, chip, recheck):
+        """The camera kept moving while we looked: stop, let it settle, find the chip again."""
+        if chip is None:
+            return None
+        self.release_all()
+        time.sleep(config.SETTLE)
+        chip = recheck(self.grab())
+        if chip is None:
+            self.say("chip moved away after settling")
+        return chip
+
+    def _goto_text(self, prompts, landmarks, customer=None):
         """Customer / bin: nothing is highlighted, so turn looking for their chip text. If no
         chip is in reach, walk at a landmark label (slow OCR, refreshed every few bursts)."""
         looks = [0]
@@ -830,16 +745,16 @@ class Bot:
                 return hit
             looks[0] += 1
             if near is None or looks[0] % 3 == 0:
-                return find_landmark(img, landmarks)
+                return find_landmark(img, landmarks, customer)
             return Target(near.box, near.text, stale=True)
 
         target = self.scan(lambda img, near: find_prompt(img, prompts), slow=False)
         if target is not None:
             return target.chip
-        self.say(f"no prompt in reach, looking for {landmarks[0]} (slow OCR)")
+        self.say(f"no prompt in reach, looking for {customer or landmarks[0]} (slow OCR)")
         for _ in range(8):                  # roughly a full turn in coarse steps
             self.check()
-            target = find_landmark(self.grab(), landmarks)
+            target = find_landmark(self.grab(), landmarks, customer)
             if target is not None:
                 return target.chip or self.approach(target, locate, lambda img, t: None, slow=True)
             self.tap(config.TURN_RIGHT, 3 * config.SCAN_STEP)
@@ -858,63 +773,10 @@ class Bot:
 
     def use(self, chip):
         self.say(f"using {chip.text!r} ({chip.key})")
-        if chip.key == "e":
-            self.tap(config.INTERACT, 0.08)     # this E chip is under our target, so E is ours
+        if config.PRESS_E and chip.key == "e":
+            self.tap(config.INTERACT, config.INTERACT_HOLD)     # the E chip under our target is ours
         else:
-            self.click_client(chip.x, chip.y)
-
-    # ---------------------------------------------------------- popups / minigame
-    def read_order(self, timeout=10.0):
-        """Click through the customer's lines and remember the order (it can't be asked again)."""
-        self.say("listening to the order")
-        H, W = self.scr.rect[3], self.scr.rect[2]
-        x0, y0, x1, y1 = region_box(config.DIALOGUE_REGION, W, H)
-        t0, blank, heard = time.time(), 0, False
-        while time.time() - t0 < timeout:
-            self.check(panel_every=0)
-            img = self.grab()
-            text = dialogue_text(img)
-            if not (is_dialogue(text) or continue_visible(img)):
-                blank += 1
-                if blank >= 4 and (heard or time.time() - t0 > 4):
-                    break
-                time.sleep(0.25)
-                continue
-            blank = 0
-            drink, syrup = parse_order(text)
-            if drink:
-                self.set_order(drink, syrup)
-                heard = True
-            self.click_client((x0 + x1) // 2, (y0 + y1) // 2)     # "click to continue"
-            time.sleep(0.5)
-        return heard
-
-    def pick(self, aliases, what, timeout=4.0):
-        """Click the matching card in the cup / flavour picker."""
-        self.say(f"picking {what}")
-        t0 = time.time()
-        while time.time() - t0 < timeout:
-            self.check(panel_every=0)
-            img = self.grab()
-            card = find_card(img, aliases)
-            if card:
-                self.debug_save(img, f"pick_{what}", [(card[0] - 40, card[1] - 10, card[0] + 40, card[1] + 10)])
-                self.click_client(card[0], card[1])
-                time.sleep(0.6)
-                return True
-            time.sleep(0.2)
-        return False
-
-    def play_shot(self):
-        self.say("pulling the shot (EKSTRAKSI)")
-
-        def grab(rect):
-            if rect is None:
-                return self.grab()
-            x, y, w, h = rect
-            return self.scr.grab((x, y, x + w, y + h))
-
-        return coffee.play(grab, lambda: self.enabled.is_set() and self.scr.focused())
+            self.click_client(chip.x, chip.y, config.INTERACT_HOLD)     # "Click" chips aren't the nearest prompt, E would miss them
 
     # ---------------------------------------------------------- one step
     def wait_for_change(self, step, timeout=config.ACTION_WAIT):
@@ -922,7 +784,7 @@ class Bot:
         while time.time() - t0 < timeout:
             self.check(panel_every=0)
             if coffee.find_track(self.grab()) is not None:     # a minigame we didn't expect
-                self.play_shot()
+                coffee.pull_shot(self)
             new = parse_panel(panel_text(self.grab()))
             if new is not None and new.key() != step.key():
                 return True
@@ -937,42 +799,44 @@ class Bot:
     def do(self, step):
         self.step, self._last_check = step, time.time()
         self.status.step = str(step)
-        if dialogue_up(self.grab()):                     # the customer is still talking
-            self.read_order()
+        self.status.current = step.action if step.kind == "station" else step.kind
+        if coffee.dialogue_up(self.grab()):                     # the customer is still talking
+            coffee.take_order(self)
         drink, syrup = self.order or (None, None)
 
         # a picker may still be open from a previous attempt
         want = config.MENU[drink] if step.kind == "cup" and drink else \
             [syrup] if step.action == "Pick a Flavour" and syrup else None
-        if want and find_card(self.grab(), want):
-            self.pick(want, want[0])
+        if want and coffee.find_card(self.grab(), want):
+            coffee.pick_card(self, want, want[0])
             self.wait_for_change(step)
             return
 
         if step.kind == "ask":
             chip = self.goto_text(config.ASK_PROMPTS, config.COUNTER_LANDMARKS)
             if chip:
+                self.customer = self.status.customer = customer_name(self.grab(), chip)
+                self.say(f"customer: {self.customer or '?'}")
                 self.use(chip)
                 time.sleep(0.6)
-                if not self.read_order():
+                if not coffee.take_order(self):
                     self.say("didn't catch the order")
         elif step.kind == "serve":
-            chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS)
+            chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS, self.customer)
             if chip:
                 self.use(chip)
         elif step.kind == "bin":
-            names, prompts = station_info("Bin")
-            chip = self.goto_text(prompts, names)
+            chip = self.goto_station("Bin", [], slow=True)
             if chip:
                 self.use(chip)
         elif step.kind == "cup":
             if not drink:
                 return self.need_order("cup")
-            chip = self.goto_station("Cup Rack", [])
+            chip = self.goto_station("Cup Rack", [], slow=True)
             if chip:
                 self.use(chip)
                 time.sleep(0.5)
-                self.pick(config.MENU[drink], drink)
+                coffee.grab_cup(self, drink)
         elif step.kind == "station":
             if step.action == "Pick a Flavour" and not (syrup or config.DEFAULT_SYRUP):
                 return self.need_order("flavour")
@@ -982,18 +846,21 @@ class Bot:
                 time.sleep(0.4)
                 if step.action == "Pick a Flavour":
                     s = syrup or config.DEFAULT_SYRUP
-                    self.pick([s], s)
+                    coffee.add_flavour(self, s)
                 elif step.action == "Pull the Shot":
-                    self.play_shot()
+                    coffee.pull_shot(self)
         if not self.wait_for_change(step):
             n = self.fails[step.key()] = self.fails.get(step.key(), 0) + 1
             if n % 3 == 0:
                 self.unstick()
             return
         self.fails.pop(step.key(), None)
+        self.stuck_count = 0
         if step.kind == "serve":            # next customer; an order can't be re-asked, so only now
-            self.order = None
+            self.order = self.customer = self.status.customer = None
             self.status.order, self.status.plan = "-", ""
+            self.status.route, self.status.current = coffee.route(None, None), "ask"
+            self.status.served += 1
 
     # ---------------------------------------------------------- main loop
     def run(self):
@@ -1010,8 +877,8 @@ class Bot:
                     self.step = None
                     self.status.step = "-"
                     # a dialogue left open (e.g. we asked but missed the reply)?
-                    if dialogue_up(self.grab()):
-                        self.read_order()
+                    if coffee.dialogue_up(self.grab()):
+                        coffee.take_order(self)
                     elif time.time() - idle_since > 5:
                         self.say("can't read the BARISTA panel (is the job started?)")
                     time.sleep(0.4)
@@ -1031,6 +898,11 @@ class Bot:
 
 # ================================================================ overlay + entry points
 
+SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+THEME = {"bg": "#16181d", "panel": "#1f232b", "text": "#e8eaed", "dim": "#6b7280", "done": "#4ade80",
+         "now": "#fbbf24", "warn": "#f87171", "track": "#2c313a"}
+
+
 def run_overlay():
     import keyboard
     import tkinter as tk
@@ -1038,18 +910,20 @@ def run_overlay():
     enabled = threading.Event()
     enabled.set()
     bot = Bot(enabled)
+    loaded = threading.Event()
+    W, PAD, ROW = 330, 14, 22
 
     root = tk.Tk()
     root.overrideredirect(True)
     root.attributes("-topmost", True)
-    root.geometry("340x150+20+200")
-    label = tk.Label(root, text="Loading OCR...", bg="#222222", fg="white", font=("Segoe UI", 10, "bold"),
-                     justify="left", anchor="nw", wraplength=324, padx=8, pady=4)
-    label.pack(fill="both", expand=True)
+    root.attributes("-alpha", 0.94)
+    root.geometry(f"{W}x160+20+200")
+    cv = tk.Canvas(root, width=W, height=160, bg=THEME["bg"], highlightthickness=0)
+    cv.pack(fill="both", expand=True)
 
     drag = {"x": 0, "y": 0}
-    label.bind("<Button-1>", lambda e: drag.update(x=e.x_root - root.winfo_x(), y=e.y_root - root.winfo_y()))
-    label.bind("<B1-Motion>", lambda e: root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}"))
+    cv.bind("<Button-1>", lambda e: drag.update(x=e.x_root - root.winfo_x(), y=e.y_root - root.winfo_y()))
+    cv.bind("<B1-Motion>", lambda e: root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}"))
     root.update()
 
     # keep the overlay from stealing focus from Roblox
@@ -1057,7 +931,11 @@ def run_overlay():
     hwnd = u32.GetParent(root.winfo_id())
     u32.SetWindowLongW(hwnd, -20, u32.GetWindowLongW(hwnd, -20) | 0x08000000 | 0x80)
 
-    reader().readtext(np.zeros((64, 256, 3), np.uint8))       # first inference finishes init
+    def load():
+        reader().readtext(np.zeros((64, 256, 3), np.uint8))       # first inference finishes init
+        loaded.set()
+        threading.Thread(target=bot.run, daemon=True).start()
+        print(f"CDID barista bot running. {config.TOGGLE_KEY} = pause/resume, {config.FORCE_CLOSE_KEY} = quit.")
 
     def toggle():
         (enabled.clear if enabled.is_set() else enabled.set)()
@@ -1066,25 +944,69 @@ def run_overlay():
     def force_close():
         print(f"[{config.FORCE_CLOSE_KEY}] quitting")
         bot.release_all()
-        for key in ("space", config.FORWARD, config.TURN_LEFT, config.TURN_RIGHT):
-            try:
-                keyboard.release(key)
-            except Exception:
-                pass
+        for key in SCANCODES:
+            send_key(key, False)
         os._exit(0)
 
     keyboard.add_hotkey(config.TOGGLE_KEY, toggle)
     keyboard.add_hotkey(config.FORCE_CLOSE_KEY, force_close)
-    threading.Thread(target=bot.run, daemon=True).start()
-    print(f"CDID barista bot running. {config.TOGGLE_KEY} = pause/resume, {config.FORCE_CLOSE_KEY} = quit.")
+    threading.Thread(target=load, daemon=True).start()
+    font = ("Segoe UI", 10)
+    bold = ("Segoe UI Semibold", 10)
+
+    def text(x, y, s, color=THEME["text"], f=font, anchor="nw", **kw):
+        return cv.create_text(x, y, text=s, fill=color, font=f, anchor=anchor, **kw)
+
+    def bar(y, frac, color, t):
+        cv.create_rectangle(PAD, y, W - PAD, y + 6, fill=THEME["track"], width=0)
+        if frac is None:                      # indeterminate: a block sweeping across
+            x = PAD + (t * 180) % (W - 2 * PAD + 60) - 60
+            cv.create_rectangle(max(PAD, x), y, min(W - PAD, x + 60), y + 6, fill=color, width=0)
+        else:
+            cv.create_rectangle(PAD, y, PAD + (W - 2 * PAD) * frac, y + 6, fill=color, width=0)
 
     def refresh():
+        t = time.time()
+        spin = SPINNER[int(t * 12) % len(SPINNER)]
         s = bot.status
-        label.config(
-            text=(f"{config.TOGGLE_KEY} pause  {config.FORCE_CLOSE_KEY} quit\n"
-                  f"Step: {s.step}\nOrder: {s.order}\n{s.plan}\n{s.state}"),
-            bg="#552222" if s.paused else "#225522")
-        root.after(150, refresh)
+        cv.delete("all")
+        text(PAD, 10, "☕ BARISTA BOT", f=("Segoe UI Semibold", 11))
+        if not loaded.is_set():
+            text(PAD, 40, f"{spin}  Loading OCR models…", THEME["now"])
+            bar(66, None, THEME["now"], t)
+            text(PAD, 84, f"{config.TOGGLE_KEY} pause · {config.FORCE_CLOSE_KEY} quit", THEME["dim"], ("Segoe UI", 8))
+            height = 110
+        else:
+            badge, color = ("❚❚ PAUSED", THEME["warn"]) if s.paused else ("● RUNNING", THEME["done"])
+            text(W - PAD, 12, badge, color, ("Segoe UI Semibold", 9), anchor="ne")
+            text(PAD, 34, f"Order: {s.order}" + (f"  · {s.customer}" if s.customer else ""), THEME["text"], bold)
+            text(W - PAD, 34, f"served {s.served}", THEME["dim"], ("Segoe UI", 9), anchor="ne")
+            keys = [k for k, _ in s.route]
+            cur = keys.index(s.current) if s.current in keys else (
+                keys.index("recipe") if "recipe" in keys and s.current not in (None, "ask", "cup") else -1)
+            done = max(cur, 0)
+            bar(58, done / len(keys), THEME["done"], t)
+            y = 74
+            if s.current == "bin":
+                text(PAD, y, f"{spin}  Drink ruined, binning it", THEME["warn"], bold)
+                y += ROW
+            for i, (_, label) in enumerate(s.route):
+                if i < cur:
+                    text(PAD, y, f"✓  {label}", THEME["dim"])
+                elif i == cur:
+                    cv.create_rectangle(PAD - 6, y - 2, W - PAD + 6, y + ROW - 3, fill=THEME["panel"], width=0)
+                    text(PAD, y, f"{'❚❚' if s.paused else spin}  {label}", THEME["now"], bold)
+                else:
+                    text(PAD, y, f"○  {label}", THEME["dim"])
+                y += ROW
+            cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=THEME["track"])
+            state = text(PAD, y + 10, s.state, THEME["text"], ("Segoe UI", 9), width=W - 2 * PAD)
+            y = cv.bbox(state)[3] + 8
+            text(PAD, y, f"{config.TOGGLE_KEY} pause · {config.FORCE_CLOSE_KEY} quit", THEME["dim"], ("Segoe UI", 8))
+            height = y + 22
+        cv.config(height=height)
+        root.geometry(f"{W}x{height}")
+        root.after(80, refresh)
 
     refresh()
     try:
@@ -1129,10 +1051,10 @@ def selftest(paths, slow=False):
             t1 = time.time()
             print(f" landmark: {find_landmark(img, config.BIN_LANDMARKS + config.COUNTER_LANDMARKS)}"
                   f" ({time.time() - t1:.1f}s)")
-        dtext = dialogue_text(img)
-        if is_dialogue(dtext):
-            print(f" dialogue: {dtext!r} -> {parse_order(dtext)}")
-        cards = [(a[0], find_card(img, a)) for a in list(config.MENU.values()) + [[s] for s in config.SYRUPS]]
+        dtext = coffee.dialogue_text(img)
+        if coffee.is_dialogue(dtext):
+            print(f" dialogue: {dtext!r} -> {coffee.parse_order(dtext)}")
+        cards = [(a[0], coffee.find_card(img, a)) for a in list(config.MENU.values()) + [[s] for s in config.SYRUPS]]
         if any(c for _, c in cards):
             print(" cards: " + ", ".join(f"{n}@{c[:2]}" for n, c in cards if c))
         track = coffee.find_track(img)

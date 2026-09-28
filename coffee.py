@@ -1,11 +1,135 @@
-"""EKSTRAKSI shot minigame: hold SPACE to lift the needle (cup icon), keep it in the Perfect zone."""
+"""Making the drink: the customer's order, the recipe, the cup / flavour pickers and the
+EKSTRAKSI shot minigame. The bot-facing functions take main.Bot as `bot` and use its
+say / check / grab / click_client / set_order / debug_save / scr / enabled.
+"""
 import time
 
 import cv2
-import keyboard
 import numpy as np
 
-from config import DEBUG
+import config
+from ocr import best_words, fuzzy_in, read_line, read_white_text, region_box, white_boxes, whole_match
+
+
+# ================================================================ order + recipe
+
+def parse_order(text):
+    """Customer line -> (drink, syrup); either may be None."""
+    drink = best_words(text, config.MENU)
+    syrup = best_words(text, {s: [s] for s in config.SYRUPS})
+    return drink, syrup
+
+def recipe_plan(drink, syrup):
+    """'Espresso > Milk > Maple > Ice' for the overlay."""
+    steps = []
+    for s in config.RECIPES.get(drink, []):
+        steps.append((syrup or "?") if s == "Flavour" else s)
+    return " > ".join(steps)
+
+RECIPE_ACTIONS = {"Espresso": ["Take Beans", "Load Beans", "Pull the Shot"], "Milk": ["Pour the Milk"],
+                  "Flavour": ["Pick a Flavour"], "Ice": ["Add Ice"], "Foam": ["Add Foam"], "Water": ["Add Water"]}
+
+
+def route(drink, syrup):
+    """Every panel step of an order as (key, label); key matches main.Step: kind or action."""
+    steps = [("ask", "Ask for order"), ("cup", f"Grab a cup{f' ({drink})' if drink else ''}")]
+    if drink in config.RECIPES:
+        for part in config.RECIPES[drink]:
+            for action in RECIPE_ACTIONS[part]:
+                label = f"{action} ({syrup or '?'})" if action == "Pick a Flavour" else action
+                steps.append((action, f"{label}  @ {config.ACTION_STATION[action]}"))
+    else:
+        steps.append(("recipe", "Make the drink (order unknown)"))
+    return steps + [("serve", "Hand it over")]
+
+
+def dialogue_text(img):
+    """The customer's current line ('Hi! I'd like a ...'); may be junk when no dialogue is up."""
+    H, W = img.shape[:2]
+    return read_white_text(img, region_box(config.DIALOGUE_REGION, W, H))
+
+def is_dialogue(text):
+    return any(fuzzy_in(text, w) >= 0.8 for w in config.DIALOGUE_WORDS) or parse_order(text)[0] is not None
+
+def continue_visible(img):
+    """'click to continue' / 'klik untuk lanjut' under the dialogue."""
+    H, W = img.shape[:2]
+    text, _ = read_line(img, region_box(config.CONTINUE_REGION, W, H), 3.0)
+    return max(whole_match(text, t) for t in config.CONTINUE_TEXTS) >= config.CONTINUE_CUTOFF
+
+def dialogue_up(img):
+    return continue_visible(img) or is_dialogue(dialogue_text(img))
+
+
+def take_order(bot, timeout=10.0):
+    """Click through the customer's lines and remember the order (it can't be asked again)."""
+    bot.say("listening to the order")
+    H, W = bot.scr.rect[3], bot.scr.rect[2]
+    x0, y0, x1, y1 = region_box(config.DIALOGUE_REGION, W, H)
+    t0, blank, heard = time.time(), 0, False
+    while time.time() - t0 < timeout:
+        bot.check(panel_every=0)
+        img = bot.grab()
+        text = dialogue_text(img)
+        if not (is_dialogue(text) or continue_visible(img)):
+            blank += 1
+            if blank >= 4 and (heard or time.time() - t0 > 4):
+                break
+            time.sleep(0.25)
+            continue
+        blank = 0
+        drink, syrup = parse_order(text)
+        if drink:
+            bot.set_order(drink, syrup)
+            heard = True
+        bot.click_client((x0 + x1) // 2, (y0 + y1) // 2)     # "click to continue"
+        time.sleep(0.5)
+    return heard
+
+
+# ================================================================ cup + flavour pickers
+
+def find_card(img, aliases):
+    """Card in the cup / flavour picker whose label best matches aliases -> (x, y, text)."""
+    H, W = img.shape[:2]
+    best, best_score = None, 0.75
+    for x0, y0, x1, y1 in white_boxes(img, region_box(config.MODAL_REGION, W, H), (90, 190), (100, 190), 0.6):
+        text, _ = read_line(img, (x0 + 2, y0 + 0.72 * (y1 - y0), x1 - 2, y1 - 2), 2.0)
+        score = max(whole_match(text, a) for a in aliases)
+        if score > best_score:
+            best, best_score = ((x0 + x1) // 2, (y0 + y1) // 2, text), score
+    return best
+
+
+def pick_card(bot, aliases, what, timeout=4.0):
+    """Click the matching card in the cup / flavour picker."""
+    bot.say(f"picking {what}")
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        bot.check(panel_every=0)
+        img = bot.grab()
+        card = find_card(img, aliases)
+        if card:
+            bot.debug_save(img, f"pick_{what}", [(card[0] - 40, card[1] - 10, card[0] + 40, card[1] + 10)])
+            bot.click_client(card[0], card[1])
+            time.sleep(0.6)
+            return True
+        time.sleep(0.2)
+    return False
+
+
+def grab_cup(bot, drink):
+    """Cup picker: click the ordered drink (a wrong cup means an angry customer, XP -25)."""
+    return pick_card(bot, config.MENU[drink], drink)
+
+
+def add_flavour(bot, syrup):
+    """Flavour picker: click the ordered syrup."""
+    return pick_card(bot, [syrup], syrup)
+
+
+# ================================================================ EKSTRAKSI shot minigame
+# Hold SPACE to lift the needle (cup icon), keep it in the Perfect zone.
 
 # The track is a wide tan -> dark-brown gradient bar in the bottom of the screen.
 SEARCH_TOP = 0.6                        # fraction of client height to start looking
@@ -13,6 +137,7 @@ TRACK_LO, TRACK_HI = (5, 60, 20), (21, 255, 255)
 TRACK_ASPECT = (5.0, 14.0)              # w / h, 400x42 at 1920x1172
 TRACK_MIN_W = 0.1                       # fraction of client width
 TRACK_FILL = 0.75
+TRACK_CENTER_TOL = 0.1                  # |bar centre - screen centre| / width
 
 # HSV ranges measured from the recordings.
 ZONE_LO, ZONE_HI = (16, 135, 140), (21, 190, 205)   # flat fill of the Perfect zone
@@ -35,16 +160,35 @@ def find_track(img):
     for x, y, w, h, area in stats[1:]:
         if w < TRACK_MIN_W * W or not TRACK_ASPECT[0] <= w / max(h, 1) <= TRACK_ASPECT[1]:
             continue
-        if area < TRACK_FILL * w * h:
-            continue
+        if area < TRACK_FILL * w * h or abs(x + w / 2 - W / 2) > TRACK_CENTER_TOL * W:
+            continue                    # the bar is centred; the minimap's tint isn't
         v = hsv[y + h // 4:y + 3 * h // 4, :, 2]
         if np.median(v[:, x:x + w // 20]) < 150 or np.median(v[:, x + w - w // 20:x + w]) > 100:
             continue                    # not light-to-dark
         if best is None or w > best[2]:
             best = (int(x), int(y) + top, int(w), int(h))
-    if DEBUG and best:
+    best = best or fixed_track(img)
+    if config.DEBUG and best:
         print(f"[coffee] track at {best}")
     return best
+
+
+def fixed_track(img):
+    """The track where the panel always puts it, checked by its look: over a dark brown floor
+    the see-through panel matches the track's colours and the blob search above merges them."""
+    H, W = img.shape[:2]
+    x0, y0, x1, y1 = region_box(config.TRACK_REGION, W, H)
+    crop = img[y0:y1, x0:x1]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h, w = hsv.shape[:2]
+    band = hsv[int(.3 * h):int(.7 * h)]
+    light = np.median(band[:, int(.08 * w):int(.15 * w), 2]) >= 150        # past the cup at 0%
+    dark = np.median(band[:, int(.88 * w):int(.97 * w), 2]) <= 90
+    brown = ((band[..., 0] >= 5) & (band[..., 0] <= 22) & (band[..., 1] >= 80)).mean() >= 0.8
+    if not (light and dark and brown):
+        return None
+    needle, zone = locate(crop)                     # a light-to-dark counter top has neither
+    return (x0, y0, x1 - x0, y1 - y0) if needle is not None and zone is not None else None
 
 
 def locate(strip):
@@ -81,9 +225,9 @@ def locate(strip):
     return needle_x, zone_c
 
 
-def play(grab, is_running, timeout=4.0):
+def play(grab, is_running, press, release, timeout=4.0):
     """Play one round. grab(rect) -> BGR of that client rect; grab(None) -> full client.
-    is_running() -> False aborts. Returns True if a round was played."""
+    press/release(key) send keys; is_running() -> False aborts. True if a round was played."""
     t0 = time.time()
     rect = None
     while rect is None:
@@ -97,7 +241,7 @@ def play(grab, is_running, timeout=4.0):
     def set_key(want):
         nonlocal held
         if want != held:
-            (keyboard.press if want else keyboard.release)("space")
+            (press if want else release)("space")
             held = want
 
     lost = 0
@@ -131,10 +275,22 @@ def play(grab, is_running, timeout=4.0):
             elif err < -DEADBAND * w:
                 set_key(False)         # needle right of the zone: let it fall back
 
-            if DEBUG and now - last_print > 0.5:
+            if config.DEBUG and now - last_print > 0.5:
                 last_print = now
                 print(f"[coffee] needle={needle_x:6.1f} zone={zone_c} held={held}")
             time.sleep(0.004)
     finally:
         set_key(False)
     return True
+
+
+def pull_shot(bot):
+    bot.say("pulling the shot (EKSTRAKSI)")
+
+    def grab(rect):
+        if rect is None:
+            return bot.grab()
+        x, y, w, h = rect
+        return bot.scr.grab((x, y, x + w, y + h))
+
+    return play(grab, lambda: bot.enabled.is_set() and bot.scr.focused(), bot.hold, bot.release)

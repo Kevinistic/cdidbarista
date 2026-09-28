@@ -9,6 +9,8 @@ FORWARD, BACK = "w", "s"
 STRAFE_LEFT, STRAFE_RIGHT = "a", "d"
 JUMP = "space"
 INTERACT = "e"
+INTERACT_HOLD = 1.0         # s to hold E: "Take a Cup" is a hold prompt, 0.3 s and clicks didn't fire it
+PRESS_E = True              # E chips get E held; "Click" chips get clicked
 
 # ---------------------------------------------------------------- menu / recipes
 # canonical name -> every spelling seen in-game (English UI, Indonesian UI)
@@ -62,7 +64,7 @@ ACTION_STATION = {
 # names: the floating label. prompts: text on the chip that appears under it when close.
 STATIONS = {
     "Cup Rack": {"names": ["Cup Rack", "Rak Gelas"], "prompts": ["Take a Cup", "Ambil Gelas"]},
-    "Bean Hopper": {"names": ["Bean Hopper", "Wadah Biji"], "prompts": ["Take Beans", "Ambil Biji"]},
+    "Bean Hopper": {"names": ["Bean Hopper", "Wadah Biji"], "prompts": ["Take Beans", "Scoop Beans", "Ambil Biji"]},
     "Coffee Maker": {"names": ["Coffee Maker", "Mesin Kopi"],
                      "prompts": ["Use the Machine", "Load Beans", "Pull the Shot",
                                  "Pakai Mesin", "Taruh Biji", "Seduh"]},
@@ -93,7 +95,8 @@ ASK_PROMPTS = ["Ask for order", "Tanya Pesanan"]
 SERVE_PROMPTS = ["Hand over", "Serahkan"]
 COUNTER_LANDMARKS = ["Bean Hopper", "Coffee Maker", "Wadah Biji", "Mesin Kopi"]
 BIN_LANDMARKS = ["Bin", "Tong Sampah"]
-DIALOGUE_WORDS = ["Hi", "Halo", "like", "please", "pesan"]
+NAME_TAG_OFFSET = (180, 85)    # px @1172: chip left -> customer's name tag centre, chip top -> tag bottom
+DIALOGUE_WORDS =["Hi", "Halo", "like", "please", "pesan"]
 
 # ---------------------------------------------------------------- vision
 # Screen regions as fractions of the Roblox client area (measured at 1920x1172).
@@ -107,8 +110,10 @@ PANEL_REGION = ((1.0, 0.0), (1.0, 0.15), (0.20, 0.25))        # BARISTA panel (n
 DIALOGUE_REGION = ((0.5, 0.0), (0.5, 0.825), (0.50, 0.055))   # "Hi! I'd like a ... please." (one line)
 CONTINUE_REGION = ((0.5, 0.0), (0.5, 0.876), (0.20, 0.04))    # "click to continue" under it
 MODAL_REGION = ((0.5, 0.5), (0.5, 0.525), (0.50, 0.65))       # cup picker / flavour picker
-WORLD_REGION = ((0.0, 0.0), (0.19, 0.08), (0.81, 0.82))       # where world labels can show up
-HUD_BLOCK = ((1.0, 0.0), (1.0, 0.0), (0.17, 0.37))            # panel, masked out of WORLD_REGION
+TRACK_REGION = ((0.0, 0.0), (0.3688, 0.8020), (0.2094, 0.0401))   # EKSTRAKSI track, 708,940 402x47
+WORLD_REGION = ((0.0, 0.0), (0.19, 0.0), (0.81, 0.90))        # where world labels can show up
+TOPBAR_BLOCK = ((0.0, 0.0), (0.0, 0.0), (0.30, 0.065))       # Roblox menu buttons; labels near the top are kept
+HUD_BLOCK = ((1.0, 0.0), (1.0, 0.0), (0.17, 0.37))            # panel + clock, masked out of WORLD_REGION
 
 CONTINUE_TEXTS = ["click to continue", "klik untuk lanjut"]
 CONTINUE_CUTOFF = 0.47
@@ -123,11 +128,16 @@ MATCH_CUTOFF = 0.6         # fuzzy ratio for station/prompt/menu text
 # ---------------------------------------------------------------- navigation tuning
 SEEK_TIMEOUT = 10.0        # s of holding TURN_RIGHT before wandering somewhere else
 SCAN_STEP = 0.18           # s per turn tap when scanning with (slow) OCR
+# Turning accelerates: <=0.03 s taps don't register, 0.05-0.08 s moves ~65 px, 0.12 s jumps 400+ px.
+TURN_TAP = 0.06            # s of one fine turn pulse
+TURN_PULSE = 0.034         # fraction of the width one pulse moves the view (65 px @1920)
+MAX_PULSES = 4             # pulses per correction before looking again
+FAST_SCAN_STEP = 0.1       # s per turn tap when scanning for the chevron (fast)
 APPROACH_TIMEOUT = 15.0
 CENTER_TOL = 0.12          # |offset| / width before we stop walking and turn first
 STEER_TOL = 0.04           # |offset| / width before a steering tap while walking
-STEER_GAIN = 0.5           # s of turn per unit offset
 LOST_TIMEOUT = 1.2         # s the target may vanish during approach
 STUCK_TIMEOUT = 3.0        # s without the label growing before trying to unstick
-WALK_BURST = 0.35          # s of walking between OCR checks in text mode
+WALK_BURST = 0.25          # s of walking between looks (holding W walked past the chip)
+SETTLE = 0.3               # s to let the camera stop before re-finding a chip to click
 ACTION_WAIT = 3.0          # s to wait for an interaction to change something

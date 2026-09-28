@@ -12,10 +12,10 @@ clicked by OCR, the shot minigame is coffee.py.
 import argparse
 import ctypes
 import difflib
+import math
 import os
 import random
 import re
-import threading
 import time
 from dataclasses import dataclass, field
 
@@ -24,8 +24,7 @@ import numpy as np
 
 import coffee
 import config
-from ocr import (REF_H, best_alias, fuzzy_in, read_line, read_white_text, reader,
-                 region_box, squash, white_boxes)
+from ocr import REF_H, best_alias, fuzzy_in, read_line, read_white_text, region_box, squash, white_boxes
 
 try:  # per-monitor DPI awareness so screen pixels match win32 coordinates 1:1
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -524,6 +523,19 @@ class Status:
     customer: str = None
     current: str = None       # key of the step being worked on ("bin" while binning a ruined drink)
     served: int = 0
+    goal: str = None          # map target being walked to
+    since: float = field(default_factory=time.time)     # when `current` started
+    took: dict = field(default_factory=dict)            # step key -> seconds it took this order
+    order_times: list = field(default_factory=list)     # seconds per served order
+    started: float = field(default_factory=time.time)
+    focused: bool = True
+
+    def enter(self, key):
+        """Mark the step now being worked on; closes the timer of the previous one."""
+        if key != self.current:
+            if self.current is not None:
+                self.took[self.current] = time.time() - self.since
+            self.current, self.since = key, time.time()
 
 
 class Bot:
@@ -538,6 +550,14 @@ class Bot:
         self.stuck_count = 0              # unstick() attempts, grows the sideways slide
         self._last_check = 0.0
         self.scr = None
+        self.nav = None                   # nav.Navigator once a map.json exists (tools/mapper.py)
+        self.used_at = None               # where we stood when using the last chip
+        try:
+            import nav
+            cafe = nav.Map.load()
+            self.nav = nav.Navigator(cafe) if cafe else None
+        except Exception as e:            # a broken map must never stop the bot: vision still works
+            print(f"[nav] map not used: {e!r}")
 
     # ---------------------------------------------------------- plumbing
     def say(self, state):
@@ -546,7 +566,8 @@ class Bot:
             print(f"[bot] {state}")
 
     def ready(self):
-        ok = self.enabled.is_set() and self.scr.find() is not None and self.scr.focused()
+        self.status.focused = self.scr.find() is not None and self.scr.focused()
+        ok = self.enabled.is_set() and self.status.focused
         if not ok:
             self.release_all()
         self.status.paused = not ok
@@ -685,6 +706,8 @@ class Bot:
     def unstick(self):
         """Walking into a wall (labels show through walls): back off and slide sideways, a
         little further and on the other side each time, to find the way around."""
+        if self.nav:
+            self.nav.stuck()
         self.stuck_count += 1
         side = config.STRAFE_LEFT if self.stuck_count % 2 else config.STRAFE_RIGHT
         self.say(f"stuck, backing off and strafing {side}")
@@ -693,16 +716,98 @@ class Bot:
         self.tap(side, min(0.6 + 0.4 * self.stuck_count, 2.5))     # no jump: it lands on the counter
 
     def wander(self):
-        """Nothing found after a full turn: back up for a wider view (walking forward at random
-        led into side rooms) and look again."""
+        """Nothing found after a full turn: with a map, go back to the middle of the walked floor;
+        without, back up for a wider view (walking forward at random led into side rooms)."""
+        if self.nav and self.nav.nodes and self.nav.update(self.grab()):
+            hub = max(range(len(self.nav.nodes)), key=lambda i: sum(i in e for e in self.nav.edges))
+            self.say("nothing in view, back to the middle of the kitchen")
+            if self.walk_to(self.nav.nodes[hub]):
+                return
         self.say("nothing in view, backing up")
         self.tap(config.BACK, random.uniform(0.5, 1.0))
         self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
+
+    # ---------------------------------------------------------- map navigation
+    def localize(self, tries=4):
+        """Pose from the labels in view; turn a quarter at a time if too few are visible."""
+        for _ in range(tries):
+            self.check()
+            if self.nav.update(self.grab()):
+                return True
+            self.tap(config.TURN_RIGHT, config.FAST_SCAN_STEP)       # show other labels
+            time.sleep(0.15)
+        return False
+
+    def face(self, xy):
+        """Turn to look at map point xy: pulses of ~4.4 deg, dead-reckoned, with a fresh fix
+        once close (localising costs ~0.5 s, turning without looking doesn't)."""
+        for _ in range(12):
+            err = self.nav.heading_error(xy)                 # + = left
+            if abs(err) < config.FACE_TOL:
+                if self.nav.update(self.grab()) and abs(self.nav.heading_error(xy)) < config.FACE_TOL:
+                    return
+                continue
+            pulses = min(config.MAX_PULSES, max(1, round(abs(err) / config.TURN_PULSE_RAD)))
+            self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
+            self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
+
+    def walk_to(self, xy, timeout=12.0):
+        """Walk to map point xy in bursts, re-localising between them. False if stuck or lost."""
+        t0, last, still = time.time(), None, 0
+        while time.time() - t0 < timeout:
+            self.check()
+            pose = self.nav.pose
+            if pose is None:
+                return False
+            if np.linalg.norm(pose[0] - xy) < config.ARRIVE * self.nav.map.D:
+                return True
+            self.face(xy)
+            self.tap(config.FORWARD, config.WALK_BURST)
+            time.sleep(0.1)
+            if not self.nav.update(self.grab()):
+                continue
+            moved = 0 if last is None else np.linalg.norm(self.nav.pose[0] - last)
+            still = still + 1 if last is not None and moved < 0.05 * self.nav.map.D else 0
+            last = self.nav.pose[0]
+            if still >= 3:
+                self.unstick()
+                return False
+        return False
+
+    def goto_map(self, target):
+        """Walk along known floor to where target was used before (or the floor nearest its label),
+        then face its label. The vision step after this finds and checks the chip as always."""
+        if not self.nav or not self.localize():
+            return False
+        goal = self.nav.goal(target)
+        if goal is None:
+            return False
+        self.status.goal = target
+        self.say(f"map: heading to {target}")
+        route = self.nav.route(goal)
+        for i, wp in enumerate(route):
+            nodes = [j for j, n in enumerate(self.nav.nodes) if np.allclose(n, wp)]
+            here = self.nav.nearest(self.nav.pose[0])
+            self.nav._target_edge = tuple(sorted((here, nodes[0]))) if nodes and here is not None else None
+            if not self.walk_to(wp):
+                self.say(f"map: lost the way to {target}, using vision")
+                return False
+        label = self.nav.map.labels.get(target)
+        if label is not None:
+            self.face(label)
+        return True
+
+    def learn_spot(self, target):
+        """The last chip worked: remember where we stood for target."""
+        if self.nav and self.used_at is not None:
+            self.nav.learn(target, self.used_at)
+        self.used_at = None
 
     def goto_station(self, name, phrases, slow=False):
         """slow: usually found by text, not a chevron (cup rack, bin), so scan in OCR-sized steps."""
         names, prompts = station_info(name)
         phrases = list(phrases) + prompts
+        self.goto_map(name)
 
         def locate(img, near):
             return find_station_label(img, names, near)
@@ -772,6 +877,8 @@ class Bot:
         return self.approach(target, locate, chip_near, slow)
 
     def use(self, chip):
+        if self.nav:
+            self.used_at = self.nav.pose[0] if self.nav.update(self.grab()) else None
         self.say(f"using {chip.text!r} ({chip.key})")
         if config.PRESS_E and chip.key == "e":
             self.tap(config.INTERACT, config.INTERACT_HOLD)     # the E chip under our target is ours
@@ -799,7 +906,7 @@ class Bot:
     def do(self, step):
         self.step, self._last_check = step, time.time()
         self.status.step = str(step)
-        self.status.current = step.action if step.kind == "station" else step.kind
+        self.status.enter(step.action if step.kind == "station" else step.kind)
         if coffee.dialogue_up(self.grab()):                     # the customer is still talking
             coffee.take_order(self)
         drink, syrup = self.order or (None, None)
@@ -813,6 +920,7 @@ class Bot:
             return
 
         if step.kind == "ask":
+            self.goto_map("register")
             chip = self.goto_text(config.ASK_PROMPTS, config.COUNTER_LANDMARKS)
             if chip:
                 self.customer = self.status.customer = customer_name(self.grab(), chip)
@@ -822,6 +930,7 @@ class Bot:
                 if not coffee.take_order(self):
                     self.say("didn't catch the order")
         elif step.kind == "serve":
+            self.goto_map("register")
             chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS, self.customer)
             if chip:
                 self.use(chip)
@@ -855,12 +964,17 @@ class Bot:
                 self.unstick()
             return
         self.fails.pop(step.key(), None)
+        self.learn_spot({"ask": "register", "serve": "register", "bin": "Bin", "cup": "Cup Rack"}.get(
+            step.kind, step.station))
         self.stuck_count = 0
         if step.kind == "serve":            # next customer; an order can't be re-asked, so only now
             self.order = self.customer = self.status.customer = None
             self.status.order, self.status.plan = "-", ""
-            self.status.route, self.status.current = coffee.route(None, None), "ask"
-            self.status.served += 1
+            s = self.status
+            s.took[s.current] = time.time() - s.since
+            s.order_times.append(sum(s.took.values()))
+            s.route, s.took, s.served = coffee.route(None, None), {}, s.served + 1
+            s.current, s.since = "ask", time.time()
 
     # ---------------------------------------------------------- main loop
     def run(self):
@@ -896,124 +1010,7 @@ class Bot:
                 time.sleep(1.0)
 
 
-# ================================================================ overlay + entry points
-
-SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-THEME = {"bg": "#16181d", "panel": "#1f232b", "text": "#e8eaed", "dim": "#6b7280", "done": "#4ade80",
-         "now": "#fbbf24", "warn": "#f87171", "track": "#2c313a"}
-
-
-def run_overlay():
-    import keyboard
-    import tkinter as tk
-
-    enabled = threading.Event()
-    enabled.set()
-    bot = Bot(enabled)
-    loaded = threading.Event()
-    W, PAD, ROW = 330, 14, 22
-
-    root = tk.Tk()
-    root.overrideredirect(True)
-    root.attributes("-topmost", True)
-    root.attributes("-alpha", 0.94)
-    root.geometry(f"{W}x160+20+200")
-    cv = tk.Canvas(root, width=W, height=160, bg=THEME["bg"], highlightthickness=0)
-    cv.pack(fill="both", expand=True)
-
-    drag = {"x": 0, "y": 0}
-    cv.bind("<Button-1>", lambda e: drag.update(x=e.x_root - root.winfo_x(), y=e.y_root - root.winfo_y()))
-    cv.bind("<B1-Motion>", lambda e: root.geometry(f"+{e.x_root - drag['x']}+{e.y_root - drag['y']}"))
-    root.update()
-
-    # keep the overlay from stealing focus from Roblox
-    u32 = ctypes.windll.user32
-    hwnd = u32.GetParent(root.winfo_id())
-    u32.SetWindowLongW(hwnd, -20, u32.GetWindowLongW(hwnd, -20) | 0x08000000 | 0x80)
-
-    def load():
-        reader().readtext(np.zeros((64, 256, 3), np.uint8))       # first inference finishes init
-        loaded.set()
-        threading.Thread(target=bot.run, daemon=True).start()
-        print(f"CDID barista bot running. {config.TOGGLE_KEY} = pause/resume, {config.FORCE_CLOSE_KEY} = quit.")
-
-    def toggle():
-        (enabled.clear if enabled.is_set() else enabled.set)()
-        print(f"[{config.TOGGLE_KEY}] {'resumed' if enabled.is_set() else 'paused'}")
-
-    def force_close():
-        print(f"[{config.FORCE_CLOSE_KEY}] quitting")
-        bot.release_all()
-        for key in SCANCODES:
-            send_key(key, False)
-        os._exit(0)
-
-    keyboard.add_hotkey(config.TOGGLE_KEY, toggle)
-    keyboard.add_hotkey(config.FORCE_CLOSE_KEY, force_close)
-    threading.Thread(target=load, daemon=True).start()
-    font = ("Segoe UI", 10)
-    bold = ("Segoe UI Semibold", 10)
-
-    def text(x, y, s, color=THEME["text"], f=font, anchor="nw", **kw):
-        return cv.create_text(x, y, text=s, fill=color, font=f, anchor=anchor, **kw)
-
-    def bar(y, frac, color, t):
-        cv.create_rectangle(PAD, y, W - PAD, y + 6, fill=THEME["track"], width=0)
-        if frac is None:                      # indeterminate: a block sweeping across
-            x = PAD + (t * 180) % (W - 2 * PAD + 60) - 60
-            cv.create_rectangle(max(PAD, x), y, min(W - PAD, x + 60), y + 6, fill=color, width=0)
-        else:
-            cv.create_rectangle(PAD, y, PAD + (W - 2 * PAD) * frac, y + 6, fill=color, width=0)
-
-    def refresh():
-        t = time.time()
-        spin = SPINNER[int(t * 12) % len(SPINNER)]
-        s = bot.status
-        cv.delete("all")
-        text(PAD, 10, "☕ BARISTA BOT", f=("Segoe UI Semibold", 11))
-        if not loaded.is_set():
-            text(PAD, 40, f"{spin}  Loading OCR models…", THEME["now"])
-            bar(66, None, THEME["now"], t)
-            text(PAD, 84, f"{config.TOGGLE_KEY} pause · {config.FORCE_CLOSE_KEY} quit", THEME["dim"], ("Segoe UI", 8))
-            height = 110
-        else:
-            badge, color = ("❚❚ PAUSED", THEME["warn"]) if s.paused else ("● RUNNING", THEME["done"])
-            text(W - PAD, 12, badge, color, ("Segoe UI Semibold", 9), anchor="ne")
-            text(PAD, 34, f"Order: {s.order}" + (f"  · {s.customer}" if s.customer else ""), THEME["text"], bold)
-            text(W - PAD, 34, f"served {s.served}", THEME["dim"], ("Segoe UI", 9), anchor="ne")
-            keys = [k for k, _ in s.route]
-            cur = keys.index(s.current) if s.current in keys else (
-                keys.index("recipe") if "recipe" in keys and s.current not in (None, "ask", "cup") else -1)
-            done = max(cur, 0)
-            bar(58, done / len(keys), THEME["done"], t)
-            y = 74
-            if s.current == "bin":
-                text(PAD, y, f"{spin}  Drink ruined, binning it", THEME["warn"], bold)
-                y += ROW
-            for i, (_, label) in enumerate(s.route):
-                if i < cur:
-                    text(PAD, y, f"✓  {label}", THEME["dim"])
-                elif i == cur:
-                    cv.create_rectangle(PAD - 6, y - 2, W - PAD + 6, y + ROW - 3, fill=THEME["panel"], width=0)
-                    text(PAD, y, f"{'❚❚' if s.paused else spin}  {label}", THEME["now"], bold)
-                else:
-                    text(PAD, y, f"○  {label}", THEME["dim"])
-                y += ROW
-            cv.create_line(PAD, y + 4, W - PAD, y + 4, fill=THEME["track"])
-            state = text(PAD, y + 10, s.state, THEME["text"], ("Segoe UI", 9), width=W - 2 * PAD)
-            y = cv.bbox(state)[3] + 8
-            text(PAD, y, f"{config.TOGGLE_KEY} pause · {config.FORCE_CLOSE_KEY} quit", THEME["dim"], ("Segoe UI", 8))
-            height = y + 22
-        cv.config(height=height)
-        root.geometry(f"{W}x{height}")
-        root.after(80, refresh)
-
-    refresh()
-    try:
-        root.mainloop()
-    finally:
-        force_close()
-
+# ================================================================ entry points
 
 def selftest(paths, slow=False):
     """Run every detector on screenshots and write annotated copies to debug/."""
@@ -1075,4 +1072,5 @@ if __name__ == "__main__":
     if args.test:
         selftest(args.test, args.slow)
     else:
-        run_overlay()
+        import overlay
+        overlay.run()

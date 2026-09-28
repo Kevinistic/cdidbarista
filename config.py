@@ -122,7 +122,13 @@ CONTINUE_CUTOFF = 0.47
 HIGHLIGHT_LO = (14, 80, 215)
 HIGHLIGHT_HI = (32, 255, 255)
 
-OCR_MIN_CONF = 0.25
+LEARNED_FILE = "learned.json"  # roadmap of walked floor + standing spots, grows while the bot runs
+LOCALIZE_MAX_RMS = 3.0     # deg: a worse fit means misread labels, ignore the fix
+NODE_SPACING = 0.5         # roadmap node spacing, in units of the camera distance D
+SPOTS_PER_TARGET = 3
+MAP_FILE = "map.json"      # tools/mapper.py output: label positions, camera pitch and distance
+CAMERA_VFOV = 70.0         # Roblox default vertical field of view, degrees
+OCR_MIN_CONF =0.25
 MATCH_CUTOFF = 0.6         # fuzzy ratio for station/prompt/menu text
 
 # ---------------------------------------------------------------- navigation tuning
@@ -132,6 +138,9 @@ SCAN_STEP = 0.18           # s per turn tap when scanning with (slow) OCR
 TURN_TAP = 0.06            # s of one fine turn pulse
 TURN_PULSE = 0.034         # fraction of the width one pulse moves the view (65 px @1920)
 MAX_PULSES = 4             # pulses per correction before looking again
+TURN_PULSE_RAD = 0.078     # the same pulse as a heading change (65 px at a focal length of ~836 px)
+FACE_TOL = 0.09            # rad: close enough when facing a map point
+ARRIVE = 0.35              # reached a waypoint within this many camera distances D
 FAST_SCAN_STEP = 0.1       # s per turn tap when scanning for the chevron (fast)
 APPROACH_TIMEOUT = 15.0
 CENTER_TOL = 0.12          # |offset| / width before we stop walking and turn first

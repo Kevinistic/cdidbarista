@@ -67,6 +67,7 @@ def demo_status(bot):
     bot.set_order("Iced Milk Coffee", "Raspberry")
     s = bot.status
     s.customer, s.served, s.order_times = "ardzf", 3, [104, 131, 97]
+    s.heard = "Hi! I'd like a Iced Milk Coffee with Raspberry syrup please."
     s.started = time.time() - 612
     for key in ("ask", "cup", "Take Beans", "Load Beans", "Pull the Shot"):
         s.enter(key)
@@ -276,6 +277,9 @@ def run(demo=False):
             else:
                 text(PAD, y, "Waiting for an order", C["muted"], 18, "bold")
                 y += 36
+            if s.heard:
+                hid = text(PAD, y - 6, f"heard: “{s.heard}”", C["dim"], 11, width=W - 2 * PAD)
+                y = cv.bbox(hid)[3] + 12
 
             keys = [k for k, _ in s.route]
             cur = keys.index(s.current) if s.current in keys else (

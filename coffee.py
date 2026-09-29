@@ -8,16 +8,25 @@ import cv2
 import numpy as np
 
 import config
-from ocr import best_words, fuzzy_in, read_line, read_white_text, region_box, white_boxes, whole_match
+from ocr import best_words, fuzzy_in, read_line, read_white_text, region_box, squash, white_boxes, whole_match
 
 
 # ================================================================ order + recipe
 
+def is_order_line(text):
+    """'Hi! I'd like a ...' / 'Aku pesan ...': only this sentence names the order, not junk behind it."""
+    return max(fuzzy_in(text, m) for m in config.ORDER_MARKS) >= 0.8
+
 def parse_order(text):
     """Customer line -> (drink, syrup); either may be None."""
+    if not is_order_line(text):
+        return None, None
     drink = best_words(text, config.MENU)
     syrup = best_words(text, {s: [s] for s in config.SYRUPS})
     return drink, syrup
+
+def needs_syrup(drink):
+    return "Flavour" in config.RECIPES.get(drink, [])
 
 def recipe_plan(drink, syrup):
     """'Espresso > Milk > Maple > Ice' for the overlay."""
@@ -49,7 +58,9 @@ def dialogue_text(img):
     return read_white_text(img, region_box(config.DIALOGUE_REGION, W, H))
 
 def is_dialogue(text):
-    return any(fuzzy_in(text, w) >= 0.8 for w in config.DIALOGUE_WORDS) or parse_order(text)[0] is not None
+    """Also true while the line is still typing out ('Hi!I'dlike a Iced Milk': OCR merges words)."""
+    return squash(text).startswith(("hi", "halo")) or is_order_line(text) \
+        or any(fuzzy_in(text, w) >= 0.8 for w in config.DIALOGUE_WORDS)
 
 def continue_visible(img):
     """'click to continue' / 'klik untuk lanjut' under the dialogue."""
@@ -61,30 +72,44 @@ def dialogue_up(img):
     return continue_visible(img) or is_dialogue(dialogue_text(img))
 
 
-def take_order(bot, timeout=10.0):
-    """Click through the customer's lines and remember the order (it can't be asked again)."""
+def take_order(bot, timeout=15.0):
+    """Let each line finish typing, read it, then click on. Drink and syrup are combined across
+    lines. True only if the whole order was heard (a drink, and its syrup if it takes one)."""
     bot.say("listening to the order")
     H, W = bot.scr.rect[3], bot.scr.rect[2]
     x0, y0, x1, y1 = region_box(config.DIALOGUE_REGION, W, H)
-    t0, blank, heard = time.time(), 0, False
+    drink = syrup = None
+    t0, blank, typing, since = time.time(), 0, None, 0.0
     while time.time() - t0 < timeout:
         bot.check(panel_every=0)
         img = bot.grab()
-        text = dialogue_text(img)
-        if not (is_dialogue(text) or continue_visible(img)):
+        text, done = dialogue_text(img), continue_visible(img)
+        if not (done or is_dialogue(text)):
             blank += 1
-            if blank >= 4 and (heard or time.time() - t0 > 4):
+            if blank >= 4 and (drink or time.time() - t0 > 4):
                 break
+            typing = None
             time.sleep(0.25)
             continue
         blank = 0
-        drink, syrup = parse_order(text)
-        if drink:
-            bot.set_order(drink, syrup)
-            heard = True
+        if not done:            # "click to continue" shows once typed out; else wait for the text to hold still
+            if squash(text) != typing:
+                typing, since = squash(text), time.time()
+            if time.time() - since < config.DIALOGUE_STILL:
+                time.sleep(0.2)
+                continue
+        bot.say(f"heard: {text!r}")
+        bot.status.heard = text
+        d, s = parse_order(text)
+        drink, syrup = d or drink, s or syrup
+        typing = None
         bot.click_client((x0 + x1) // 2, (y0 + y1) // 2)     # "click to continue"
         time.sleep(0.5)
-    return heard
+    if drink:
+        bot.set_order(drink, syrup)
+    ok = bool(drink) and (syrup is not None or not needs_syrup(drink))
+    bot.say(f"order: {drink or '?'}{f' + {syrup}' if syrup else ''}{'' if ok else ' (incomplete)'}")
+    return ok
 
 
 # ================================================================ cup + flavour pickers

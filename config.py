@@ -85,7 +85,7 @@ PANEL_KEYWORDS = [
     ("bin", ["ruined", "bin it", "rusak", "buang"]),
     ("serve", ["take it to the customer", "antar ke pelanggan"]),
     ("ask", ["go to the customer", "hampiri pelanggan", "tanya pesanan"]),
-    ("cup", ["grab a cup", "ambil gelas di rak", "mulai meracik"]),
+    ("cup", ["grab a cup", "cup from the rack", "ambil gelas di rak", "mulai meracik"]),   # "a" often reads as "4"
 ]
 NEXT_WORDS = ["next", "berikutnya"]
 
@@ -97,6 +97,8 @@ COUNTER_LANDMARKS = ["Bean Hopper", "Coffee Maker", "Wadah Biji", "Mesin Kopi"]
 BIN_LANDMARKS = ["Bin", "Tong Sampah"]
 NAME_TAG_OFFSET = (180, 85)    # px @1172: chip left -> customer's name tag centre, chip top -> tag bottom
 DIALOGUE_WORDS =["Hi", "Halo", "like", "please", "pesan"]
+ORDER_MARKS = ["I'd like", "Aku pesan"]     # the sentence that names the order
+DIALOGUE_STILL = 1.5       # s a line must stay unchanged to count as typed out, when "click to continue" isn't read
 
 # ---------------------------------------------------------------- vision
 # Screen regions as fractions of the Roblox client area (measured at 1920x1172).

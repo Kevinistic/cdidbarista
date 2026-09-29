@@ -444,6 +444,7 @@ def panorama(bot, spot, taps=26, tap_s=0.1, tag=None):
         time.sleep(0.35)
     total = append_obs(rows, W, H)
     print(f"  {tag}: {len(rows)} observations ({total} total)")
+    return spot                                       # where the character ended up ("...b" after a step back)
 
 
 def live_bot():
@@ -488,7 +489,7 @@ def tour(stops=TOUR):
             if bot.navigate(locate, close_enough, slow=True) is None:
                 print(f"  couldn't reach {name}, panorama here anyway")
             spot = f"s{i}_{name.replace(' ', '')}"
-            panorama(bot, spot)
+            spot = panorama(bot, spot)
             # again zoomed out, so the map (and the head-size calibration) covers other zooms
             out = ZOOM_OUT[i % len(ZOOM_OUT)]
             bot.tap(config.ZOOM_OUT, out)

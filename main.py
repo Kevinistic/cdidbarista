@@ -713,19 +713,32 @@ class Bot:
         side = config.STRAFE_LEFT if self.stuck_count % 2 else config.STRAFE_RIGHT
         self.say(f"stuck, backing off and strafing {side}")
         self.release_all()
+        before = self.thumb()
         self.tap(config.BACK, 0.5)
-        self.tap(side, min(0.6 + 0.4 * self.stuck_count, 2.5))     # no jump: it lands on the counter
+        self.tap(side, min(0.6 + 0.4 * self.stuck_count, 2.5))     # no jump first: it lands on the counter
+        time.sleep(0.2)
+        if np.mean(np.abs(self.thumb() - before)) < 2.0:            # didn't budge: seated in a chair
+            self.say("can't move (seated?), jumping")
+            self.tap(config.JUMP, 0.1)
+            time.sleep(0.5)
+            self.tap(config.BACK, 0.4)
+
+    def thumb(self):
+        """Tiny grey frame, to tell whether anything moved."""
+        return cv2.cvtColor(cv2.resize(self.grab(), (64, 40), interpolation=cv2.INTER_AREA),
+                            cv2.COLOR_BGR2GRAY).astype(np.float32)
 
     def wander(self):
         """Nothing found after a full turn: with a map, go back to the middle of the walked floor;
-        without, back up for a wider view (walking forward at random led into side rooms)."""
-        if self.nav and self.nav.nodes and self.nav.update(self.grab()):
+        without, only a short step back and a turn: long blind back-walks left the kitchen
+        (around the counter, once into a dining chair)."""
+        if self.nav and self.nav.nodes and self.localize():
             hub = max(range(len(self.nav.nodes)), key=lambda i: sum(i in e for e in self.nav.edges))
             self.say("nothing in view, back to the middle of the kitchen")
             if self.walk_to(self.nav.nodes[hub]):
                 return
-        self.say("nothing in view, backing up")
-        self.tap(config.BACK, random.uniform(0.5, 1.0))
+        self.say("nothing in view, stepping back")
+        self.tap(config.BACK, 0.25)
         self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
 
     # ---------------------------------------------------------- map navigation

@@ -86,6 +86,11 @@ def observe(img):
     return [(n, *obs[0]) for n, obs in seen.items() if len(obs) == 1]
 
 
+# Walls pull the camera in: its distance behind the character is D * pull, with a weak prior
+# toward pull 1. Pull may exceed 1 a little, so D settles at the typical distance, not the largest.
+MIN_PULL, MAX_PULL, PULL_W = 0.1, 1.5, 0.02
+
+
 def bearing(u, v, W, H, pitch, vfov=config.CAMERA_VFOV):
     """Horizontal angle (rad, + = right) of screen point (u, v) off the camera's heading, for a
     camera pitched down by `pitch` rad. Works on scalars or numpy arrays."""
@@ -127,15 +132,20 @@ class Map:
         wts = np.array([w for *_, w in known])
         cam, yaw, _ = resect(L, -b)                        # world direction = heading - bearing
 
-        def res(x):
-            c = x[:2] - self.D * np.array([math.cos(x[2]), math.sin(x[2])])
+        def bear_res(x):         # x: character xy, heading, camera pull-in (walls move the camera closer)
+            c = x[:2] - x[3] * self.D * np.array([math.cos(x[2]), math.sin(x[2])])
             return wts * wrap(np.arctan2(L[:, 1] - c[1], L[:, 0] - c[0]) - (x[2] - b))
 
-        starts = [np.array([*(cam + self.D * np.array([math.cos(yaw), math.sin(yaw)])), yaw])]
+        def res(x):
+            return np.append(bear_res(x), PULL_W * (1 - x[3]))
+
+        starts = [np.array([*(cam + self.D * np.array([math.cos(yaw), math.sin(yaw)])), yaw, 1.0])]
         if prev is not None:
-            starts.append(np.array([*prev[0], prev[1]]))
-        best = min((least_squares(res, x0, loss="soft_l1", f_scale=0.05) for x0 in starts), key=lambda r: r.cost)
-        rms = math.degrees(math.sqrt(np.mean((res(best.x) / wts) ** 2)))
+            starts.append(np.array([*prev[0], prev[1], 1.0]))
+        bounds = ([-np.inf, -np.inf, -np.inf, MIN_PULL], [np.inf, np.inf, np.inf, MAX_PULL])
+        best = min((least_squares(res, x0, bounds=bounds, loss="soft_l1", f_scale=0.05) for x0 in starts),
+                   key=lambda r: r.cost)
+        rms = math.degrees(math.sqrt(np.mean((bear_res(best.x) / wts) ** 2)))
         return best.x[:2], float(wrap(best.x[2])), rms
 
 
@@ -173,6 +183,15 @@ class Navigator:
         self.nodes, self.edges, self.blocked, self.spots = [], set(), set(), {}
         self._last_node = None
         self.load()
+        if not self.nodes:
+            self.seed()
+
+    def seed(self):
+        """Start the roadmap from the mapping tour: its spots are floor the character stood on,
+        walked in order (start, s0_..., s1_...)."""
+        for name in sorted(self.map.spots, key=lambda s: (s != "start", s)):
+            self.visit(self.map.spots[name])
+        self._last_node = None
 
     # ---------------------------------------------------------- persistence
     def load(self):

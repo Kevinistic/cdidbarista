@@ -25,10 +25,14 @@ from scipy.sparse import lil_matrix
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
-from nav import bearing, resect, wrap  # noqa: E402
+from nav import MAX_PULL, MIN_PULL, PULL_W, bearing, resect, wrap  # noqa: E402
 
 VFOV = 70.0
 VERBOSE = bool(os.environ.get("VERBOSE"))
+# Walls behind the character pull the camera in: each frame's camera sits D * pull behind it
+# (MIN_PULL..MAX_PULL, prior weight PULL_W toward 1), as in nav.Map.localize
+OUTLIER_DEG = 10.0                # residuals past this count as misreads in the reported fit
+MIN_FRAME_LABELS = 3              # a frame's heading and pull need this many labels to be worth solving
 
 
 def chain_yaws(obs, W, H, pitch):
@@ -155,18 +159,35 @@ def placeable(obs, W, H):
     return [o for o in obs if o["spot"] in pos and o["label"] in L]
 
 
+def typical_distance(D, pulls):
+    """Only D * pull is observed: restate D as the median camera distance, so localize's prior
+    (pull 1) puts the character where it usually is, not at the farthest distance seen."""
+    d = D * np.asarray(pulls)
+    typ = float(np.median(d))
+    return typ, d / typ
+
+
 def solve(obs, W, H, pitches=range(6, 50, 4)):
     """obs: [{"frame": f, "spot": s, "label": name, "u": u, "v": v, "w": weight}].
     Returns dict with labels {name: (x, y)}, spots {s: (x, y)}, yaws {f: yaw}, D, pitch, rms (deg).
     Labels / spots that can't be placed are left out (listed under "dropped")."""
     given = obs
-    obs = placeable(obs, W, H)
+    per_frame = {}
+    for o in obs:
+        per_frame[o["frame"]] = per_frame.get(o["frame"], 0) + 1
+    obs = placeable([o for o in obs if per_frame[o["frame"]] >= MIN_FRAME_LABELS], W, H)
     dropped = sorted({o["label"] for o in given} - {o["label"] for o in obs}) +         sorted({o["spot"] for o in given} - {o["spot"] for o in obs})
-    labels = sorted({o["label"] for o in obs}, key=lambda n: -sum(o["label"] == n for o in obs))
+    count = {n: sum(o["label"] == n for o in obs) for n in {o["label"] for o in obs}}
+    labels = sorted(count, key=lambda n: -count[n])
     frames = sorted({o["frame"] for o in obs})
     spots = sorted({o["spot"] for o in obs})
-    a, b = labels[0], labels[1]                     # pinned: gauge (position, rotation, scale)
-    free = labels[2:]
+    # pinned gauge (position, rotation, scale): the most-seen label and the well-seen label farthest
+    # from it in a rough layout. Neighbours (Milk and Bin) made the unit tiny and the scale unstable.
+    a = labels[0]
+    _, _, rough = incremental(obs, W, H, chain_yaws(obs, W, H, math.radians(20)), math.radians(20))
+    well = [n for n in labels[1:] if n in rough and count[n] >= np.median(list(count.values()))]
+    b = max(well, key=lambda n: np.linalg.norm(rough[n] - rough[a])) if a in rough and well else labels[1]
+    free = [n for n in labels if n not in (a, b)]
     li = {n: i for i, n in enumerate(free)}
     fi = {f: i for i, f in enumerate(frames)}
     si = {s: i for i, s in enumerate(spots)}
@@ -178,27 +199,32 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
     oF = np.array([fi[o["frame"]] for o in obs])
     oS = np.array([si[o["spot"]] for o in obs])
 
+    y0 = 2 + 2 * nL + 2 * nS                        # frame headings, then frame pull-ins
+    s0 = y0 + nF
+
     def unpack(x):
         pitch, D = x[0], x[1]
         L = x[2:2 + 2 * nL].reshape(nL, 2)
-        P = x[2 + 2 * nL:2 + 2 * nL + 2 * nS].reshape(nS, 2)
-        Y = x[2 + 2 * nL + 2 * nS:]
-        return pitch, D, L, P, Y
+        P = x[2 + 2 * nL:y0].reshape(nS, 2)
+        return pitch, D, L, P, x[y0:s0], x[s0:]
 
     def label_xy(L):
         pos = {a: (0.0, 0.0), b: (1.0, 0.0)}
         pos.update({n: tuple(L[i]) for n, i in li.items()})
         return np.array([pos[n] for n in oL])
 
-    def residuals(x):
-        pitch, D, L, P, Y = unpack(x)
+    def bearing_res(x):
+        pitch, D, L, P, Y, S = unpack(x)
         yaw = Y[oF]
-        cam = P[oS] - D * np.stack([np.cos(yaw), np.sin(yaw)], 1)
+        cam = P[oS] - (D * S[oF])[:, None] * np.stack([np.cos(yaw), np.sin(yaw)], 1)
         lx = label_xy(L)
         seen = np.arctan2(lx[:, 1] - cam[:, 1], lx[:, 0] - cam[:, 0])
         return wts * wrap(seen - (yaw - bearing(U, V, W, H, pitch, VFOV)))
 
-    sparsity = lil_matrix((len(obs), 2 + 2 * nL + 2 * nS + nF), dtype=int)
+    def residuals(x):
+        return np.concatenate([bearing_res(x), PULL_W * (1 - x[s0:])])
+
+    sparsity = lil_matrix((len(obs) + nF, s0 + nF), dtype=int)
     for i, o in enumerate(obs):
         sparsity[i, 0:2] = 1
         if o["label"] in li:
@@ -206,10 +232,14 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
             sparsity[i, j:j + 2] = 1
         j = 2 + 2 * nL + 2 * oS[i]
         sparsity[i, j:j + 2] = 1
-        sparsity[i, 2 + 2 * nL + 2 * nS + oF[i]] = 1
+        sparsity[i, y0 + oF[i]] = 1
+        sparsity[i, s0 + oF[i]] = 1
+    for f in range(nF):
+        sparsity[len(obs) + f, s0 + f] = 1
 
-    lo = np.concatenate([[0.0, 0.0], np.full(2 * nL + 2 * nS + nF, -np.inf)])
-    hi = np.concatenate([[math.radians(70), 5.0], np.full(2 * nL + 2 * nS + nF, np.inf)])
+    lo = np.concatenate([[0.0, 0.0], np.full(2 * nL + 2 * nS + nF, -np.inf), np.full(nF, MIN_PULL)])
+    # no cap on D: the unit is the distance between the two pinned labels, which can be neighbours
+    hi = np.concatenate([[math.radians(70), np.inf], np.full(2 * nL + 2 * nS + nF, np.inf), np.full(nF, MAX_PULL)])
     def fit(x0, pitch=None, nfev=4000):
         """Refine from x0; with pitch given, hold it fixed."""
         lo_, hi_ = lo.copy(), hi.copy()
@@ -249,22 +279,25 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
                 h = [math.atan2(Lpos[obs[k]["label"]][1] - Psp[1], Lpos[obs[k]["label"]][0] - Psp[0]) + bear[k]
                      for k in idx]
                 Yg[i] = math.atan2(np.mean(np.sin(h)), np.mean(np.cos(h)))
-        r = fit(np.concatenate([[pitch0, 0.05], Lg, Pg, wrap(Yg)]), pitch=pitch0, nfev=1500)
+        r = fit(np.concatenate([[pitch0, 0.05], Lg, Pg, wrap(Yg), np.ones(nF)]), pitch=pitch0, nfev=1500)
         if VERBOSE:
-            print(f"  pitch {deg:2d}: cost {r.cost:8.3f}  rms {np.degrees(np.sqrt(np.mean(residuals(r.x) ** 2))):6.2f} deg")
+            print(f"  pitch {deg:2d}: cost {r.cost:8.3f}  rms {np.degrees(np.sqrt(np.mean(bearing_res(r.x) ** 2))):6.2f} deg")
         if best is None or r.cost < best.cost:
             best = r
     best = fit(best.x)
     if VERBOSE:
         print(f"  free: cost {best.cost:8.3f}  pitch {np.degrees(best.x[0]):.1f}")
-    pitch, D, L, P, Y = unpack(best.x)
-    res = residuals(best.x) / np.maximum(wts, 1e-9)
+    pitch, D, L, P, Y, S = unpack(best.x)
+    res = np.degrees(np.abs(bearing_res(best.x) / np.maximum(wts, 1e-9)))
+    D, S = typical_distance(D, S)
+    inl = res < OUTLIER_DEG
     pos = {a: (0.0, 0.0), b: (1.0, 0.0)}
     pos.update({n: tuple(map(float, L[i])) for n, i in li.items()})
     return {"labels": pos, "spots": {s: tuple(map(float, P[i])) for s, i in si.items()},
-            "yaws": {f: float(Y[i]) for f, i in fi.items()}, "D": float(D), "pitch": float(pitch),
-            "rms_deg": float(np.degrees(np.sqrt(np.mean(res ** 2)))), "cost": float(best.cost),
-            "used": len(obs), "dropped": dropped}
+            "yaws": {f: float(Y[i]) for f, i in fi.items()}, "pulls": {f: float(S[i]) for f, i in fi.items()},
+            "D": float(D), "pitch": float(pitch),
+            "rms_deg": float(np.sqrt(np.mean(res ** 2))), "inlier_rms_deg": float(np.sqrt(np.mean(res[inl] ** 2))),
+            "outliers": float(1 - inl.mean()), "cost": float(best.cost), "used": len(obs), "dropped": dropped}
 
 
 # ---------------------------------------------------------------- synthetic test
@@ -295,7 +328,8 @@ def selftest():
             yaw = yaw0 - k * math.radians(18) + rng.normal(0, 0.05)
             f = f"{s}_{k}"
             truth_yaw[f] = yaw
-            cam = (px - D * math.cos(yaw), py - D * math.sin(yaw), cam_h)
+            d = D * (rng.uniform(0.3, 1.0) if rng.random() < 0.3 else 1.0)     # a wall pulls the camera in
+            cam = (px - d * math.cos(yaw), py - d * math.sin(yaw), cam_h)
             for n, (lx, ly) in labels.items():
                 uv = project((lx, ly, lab_h), cam, yaw, pitch, W, H)
                 if uv and 0 <= uv[0] < W and 0 <= uv[1] < H and rng.random() < 0.6:
@@ -316,7 +350,7 @@ def selftest():
     scale = np.linalg.norm(B - A)
     rot = np.array([[math.cos(-ang), -math.sin(-ang)], [math.sin(-ang), math.cos(-ang)]])
     err = [np.linalg.norm(rot @ (np.array(labels[n]) - A) / scale - np.array(m["labels"][n])) for n in labels]
-    print(f"rms bearing {m['rms_deg']:.2f} deg, D {m['D']:.2f} (true {D / scale:.2f}),"
+    print(f"rms bearing {m['rms_deg']:.2f} deg (inliers {m['inlier_rms_deg']:.2f}), D {m['D']:.2f} (true {D / scale:.2f}),"
           f" pitch {math.degrees(m['pitch']):.1f} (true 22.0)")
     print(f"label position error: median {np.median(err):.3f}, max {max(err):.3f} map units")
 
@@ -333,7 +367,8 @@ def selftest_localize(trials=200):
     for _ in range(trials):
         P = np.array([rng.uniform(1, 9), rng.uniform(1, 5)])
         yaw = rng.uniform(-np.pi, np.pi)
-        cam = (P[0] - D * math.cos(yaw), P[1] - D * math.sin(yaw), 3.0)
+        d = D * (rng.uniform(0.3, 1.0) if rng.random() < 0.3 else 1.0)
+        cam = (P[0] - d * math.cos(yaw), P[1] - d * math.sin(yaw), 3.0)
         obs = []
         for name, (lx, ly) in labels.items():
             uv = project((lx, ly, 2.2), cam, yaw, pitch, W, H)
@@ -475,7 +510,8 @@ if __name__ == "__main__":
         m = solve(data["obs"], data["W"], data["H"])
         out = sys.argv[3] if len(sys.argv) > 3 else "map.json"
         json.dump(m, open(out, "w"), indent=1)
-        print(f"{out}: {len(m['labels'])} labels, {len(m['spots'])} spots, rms {m['rms_deg']:.2f} deg,"
+        print(f"{out}: {len(m['labels'])} labels, {len(m['spots'])} spots, rms {m['rms_deg']:.2f} deg"
+              f" (inliers {m['inlier_rms_deg']:.2f}, {100 * m['outliers']:.0f}% outliers),"
               f" D {m['D']:.2f}, pitch {math.degrees(m['pitch']):.1f}, {m['used']} obs used, dropped {m['dropped']}")
     elif cmd == "show":
         show(sys.argv[2], sys.argv[3] if len(sys.argv) > 3 else "debug/map.png")

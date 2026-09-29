@@ -10,7 +10,7 @@ STRAFE_LEFT, STRAFE_RIGHT = "a", "d"
 JUMP = "space"
 INTERACT = "e"
 INTERACT_HOLD = 1.0         # s to hold E: "Take a Cup" is a hold prompt, 0.3 s and clicks didn't fire it
-PRESS_E = True              # E chips get E held; "Click" chips get clicked
+PRESS_E = False             # E and click are interchangeable; a click hits the checked chip, E the nearest prompt
 
 # ---------------------------------------------------------------- menu / recipes
 # canonical name -> every spelling seen in-game (English UI, Indonesian UI)
@@ -145,7 +145,8 @@ TURN_TAP = 0.06            # s of one fine turn pulse
 TURN_PULSE = 0.034         # fraction of the width one pulse moves the view (65 px @1920)
 MAX_PULSES = 4             # pulses per correction before looking again
 TURN_PULSE_RAD = 0.078     # the same pulse as a heading change (65 px at a focal length of ~836 px)
-FACE_TOL = 0.09            # rad: close enough when facing a map point
+FACE_TOL = 0.2             # rad: close enough when facing a map point (a pulse is 0.078, fixes jitter ~0.05)
+WALK_TOL = 0.35            # rad: while walking, steer below this; stop and turn above it
 ARRIVE = 0.35              # reached a waypoint within this many camera distances D
 FAST_SCAN_STEP = 0.1       # s per turn tap when scanning for the chevron (fast)
 APPROACH_TIMEOUT = 15.0

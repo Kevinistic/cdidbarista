@@ -753,27 +753,42 @@ class Bot:
             self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
 
     def walk_to(self, xy, timeout=12.0):
-        """Walk to map point xy in bursts, re-localising between them. False if stuck or lost."""
-        t0, last, still = time.time(), None, 0
-        while time.time() - t0 < timeout:
-            self.check()
-            pose = self.nav.pose
-            if pose is None:
-                return False
-            if np.linalg.norm(pose[0] - xy) < config.ARRIVE * self.nav.map.D:
-                return True
-            self.face(xy)
-            self.tap(config.FORWARD, config.WALK_BURST)
-            time.sleep(0.1)
-            if not self.nav.update(self.grab()):
-                continue
-            moved = 0 if last is None else np.linalg.norm(self.nav.pose[0] - last)
-            still = still + 1 if last is not None and moved < 0.05 * self.nav.map.D else 0
-            last = self.nav.pose[0]
-            if still >= 3:
-                self.unstick()
-                return False
-        return False
+        """Walk to map point xy holding W, steering between fixes (~0.6 s each); stop to turn
+        only when far off. Walking in short bursts between fixes barely moved the character."""
+        D = self.nav.map.D
+        t0, last, still, best = time.time(), None, 0, float("inf")
+        try:
+            while time.time() - t0 < timeout:
+                self.check()
+                pose = self.nav.pose
+                if pose is None:
+                    return False
+                dist = np.linalg.norm(pose[0] - xy)
+                if dist < config.ARRIVE * D or dist > best + config.ARRIVE * D:    # there, or walked past it
+                    return dist < 2 * config.ARRIVE * D
+                best = min(best, dist)
+                err = self.nav.heading_error(xy)                 # + = left
+                if abs(err) > config.WALK_TOL:
+                    self.release(config.FORWARD)
+                    self.face(xy)
+                    continue
+                self.hold(config.FORWARD)
+                if abs(err) > config.FACE_TOL:
+                    pulses = min(config.MAX_PULSES, max(1, round(abs(err) / config.TURN_PULSE_RAD)))
+                    self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
+                    self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
+                if not self.nav.update(self.grab()):
+                    continue
+                moved = 0 if last is None else np.linalg.norm(self.nav.pose[0] - last)
+                still = still + 1 if last is not None and moved < 0.05 * D else 0
+                last = self.nav.pose[0]
+                if still >= 3:
+                    self.release(config.FORWARD)
+                    self.unstick()
+                    return False
+            return False
+        finally:
+            self.release(config.FORWARD)
 
     def goto_map(self, target):
         """Walk along known floor to where target was used before (or the floor nearest its label),

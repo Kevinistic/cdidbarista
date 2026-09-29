@@ -56,7 +56,7 @@ def get_roblox_client_rect():
     hwnd = windows[0]
     _, _, w, h = win32gui.GetClientRect(hwnd)
     left, top = win32gui.ClientToScreen(hwnd, (0, 0))
-    return {"left": left, "top": top, "width": w, "height": h}
+    return {"hwnd": hwnd, "left": left, "top": top, "width": w, "height": h}
 
 
 def track_rect(W, H, s, dy=0):
@@ -108,7 +108,9 @@ def main(enabled_event=None):
         while True:
             win = get_roblox_client_rect()
             is_on = enabled_event.is_set() if enabled_event is not None else True
-            if not is_on or win is None:
+            is_focused = win is not None and win32gui.GetForegroundWindow() == win["hwnd"]
+            
+            if not is_on or win is None or not is_focused:
                 set_key(False)
                 time.sleep(0.2)
                 continue

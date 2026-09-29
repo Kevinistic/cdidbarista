@@ -262,25 +262,34 @@ def main(on_tick=None, enabled_event=None, on_status=None, schedule=None):
                 set_status(f"Order: {last_shown[0]} [PAUSED]", "#552222")
                 was_visible[0] = False
             else:
-                set_status(f"Order: {last_shown[0]}", "#225522")
                 window = get_roblox_client_rect()
-                visible = window is not None and prompt_visible(window)
-                if visible and not was_visible[0]:  # rising edge only
-                    raw, menu, syrup = read_customer_order()
-                    if menu or syrup:
-                        try:
-                            keyboard.send("space")
-                        except Exception:
-                            pass
-                    ORDER.update(menu=menu, syrup=syrup)
-                    shown = " ".join(p for p in (menu, syrup) if p) or raw
-                    last_shown[0] = shown
-                    set_status(f"Order: {shown}", "#225522")
-                    if DEBUG:
-                        print(shown)
-                was_visible[0] = visible
-                if window is not None and on_tick:
-                    on_tick(window)
+                fg_hwnd = win32gui.GetForegroundWindow()
+
+                if window is not None and fg_hwnd != window["hwnd"]:
+                    set_status(f"Order: {last_shown[0]} [UNFOCUSED]", "#552222")
+                    was_visible[0] = False
+                elif window is not None:
+                    set_status(f"Order: {last_shown[0]}", "#225522")
+                    visible = prompt_visible(window)
+                    if visible and not was_visible[0]:  # rising edge only
+                        raw, menu, syrup = read_customer_order()
+                        if menu or syrup:
+                            try:
+                                keyboard.send("space")
+                            except Exception:
+                                pass
+                        ORDER.update(menu=menu, syrup=syrup)
+                        shown = " ".join(p for p in (menu, syrup) if p) or raw
+                        last_shown[0] = shown
+                        set_status(f"Order: {shown}", "#225522")
+                        if DEBUG:
+                            print(shown)
+                    was_visible[0] = visible
+                    if on_tick:
+                        on_tick(window)
+                else:
+                    set_status(f"Order: {last_shown[0]} [NOT FOUND]", "#552222")
+                    was_visible[0] = False
         except Exception as e:
             set_status(f"error: {e}", "#552222")
         elapsed_ms = (time.perf_counter() - t0) * 1000

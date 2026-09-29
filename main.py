@@ -911,6 +911,10 @@ class Bot:
         if coffee.dialogue_up(self.grab()):                     # the customer is still talking
             coffee.take_order(self)
         drink, syrup = self.order or (None, None)
+        if step.kind == "cup" and config.DEFAULT_DRINK and not coffee.complete(drink, syrup or config.DEFAULT_SYRUP):
+            self.say(f"order not caught, making a {config.DEFAULT_DRINK}")
+            self.set_order(config.DEFAULT_DRINK, None)
+            drink, syrup = self.order
 
         # a picker may still be open from a previous attempt
         want = config.MENU[drink] if step.kind == "cup" and drink else \

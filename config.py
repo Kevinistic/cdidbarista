@@ -35,6 +35,7 @@ MENU = {
 SYRUPS = ["Blueberry", "Caramel", "Grape", "Hazelnut", "Mango", "Maple",
           "Mint", "Orange", "Peach", "Raspberry", "Strawberry", "Vanilla"]
 DEFAULT_SYRUP = None       # e.g. "Caramel"; None pauses instead of guessing (wrong drink = XP -25)
+DEFAULT_DRINK = "Black Coffee"   # made when the order wasn't caught (customers can't be re-asked); None pauses
 
 # From the in-game RECIPE GUIDE. "Flavour" gets substituted with the ordered syrup.
 RECIPES = {

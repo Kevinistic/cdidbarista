@@ -28,6 +28,10 @@ def parse_order(text):
 def needs_syrup(drink):
     return "Flavour" in config.RECIPES.get(drink, [])
 
+def complete(drink, syrup):
+    """Enough to make the drink: a drink, and its syrup if the recipe takes one."""
+    return bool(drink) and (syrup is not None or not needs_syrup(drink))
+
 def recipe_plan(drink, syrup):
     """'Espresso > Milk > Maple > Ice' for the overlay."""
     steps = []
@@ -107,7 +111,7 @@ def take_order(bot, timeout=15.0):
         time.sleep(0.5)
     if drink:
         bot.set_order(drink, syrup)
-    ok = bool(drink) and (syrup is not None or not needs_syrup(drink))
+    ok = complete(drink, syrup)
     bot.say(f"order: {drink or '?'}{f' + {syrup}' if syrup else ''}{'' if ok else ' (incomplete)'}")
     return ok
 

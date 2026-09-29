@@ -107,6 +107,20 @@ def bearing(u, v, W, H, pitch, vfov=config.CAMERA_VFOV):
     return np.arctan2(x, fwd)
 
 
+def cut_path(start, pts, length):
+    """The first `length` of the path start -> pts..., as waypoints (the last one may be cut short)."""
+    out, here, left = [], np.asarray(start, float), length
+    for p in pts:
+        p = np.asarray(p, float)
+        d = np.linalg.norm(p - here)
+        if d >= left:
+            out.append(here + (p - here) * (left / d) if d else p)
+            return out
+        out.append(p)
+        here, left = p, left - d
+    return out
+
+
 def wrap(a):
     return (a + np.pi) % (2 * np.pi) - np.pi
 
@@ -119,6 +133,21 @@ class Map:
         self.labels = {n: np.array(p) for n, p in data["labels"].items()}
         self.pitch, self.D = data["pitch"], data["D"]
         self.spots = {k: np.array(v) for k, v in data.get("spots", {}).items()}
+        # the front counter (its end labels) splits the kitchen from the dining room; the
+        # mapping tour stood in the kitchen, which fixes which side is inside
+        a, b = (self.labels.get(n) for n in config.COUNTER_ENDS)
+        self.counter = None
+        if a is not None and b is not None and self.spots:
+            normal = np.array([a[1] - b[1], b[0] - a[0]]) / (np.linalg.norm(b - a) or 1.0)
+            inside = np.median([(p - a) @ normal for p in self.spots.values()])
+            self.counter = (a, normal * (1.0 if inside < 0 else -1.0))
+
+    def beyond_counter(self, xy):
+        """How far xy is on the dining side of the counter line (negative = kitchen side)."""
+        if self.counter is None:
+            return float("-inf")
+        a, out = self.counter
+        return float((np.asarray(xy) - a) @ out)
 
     @classmethod
     def load(cls, path=config.MAP_FILE):
@@ -225,13 +254,32 @@ class Navigator:
             self.edges = {tuple(e) for e in d.get("edges", [])}
             self.blocked = {tuple(e) for e in d.get("blocked", [])}
             self.spots = {k: [np.array(p) for p in v] for k, v in d.get("spots", {}).items()}
+            self.walks = d.get("walks", self.walks)
 
     def save(self):
         import json
         json.dump({"nodes": [list(map(float, p)) for p in self.nodes], "edges": sorted(self.edges),
                    "blocked": sorted(self.blocked),
-                   "spots": {k: [list(map(float, p)) for p in v] for k, v in self.spots.items()}},
+                   "spots": {k: [list(map(float, p)) for p in v] for k, v in self.spots.items()},
+                   "walks": self.walks},
                   open(self.path, "w"))
+
+    # ---------------------------------------------------------- how far to trust a map walk
+    walks = {"ok": 0, "fail": 0}           # map walk outcomes over all runs
+
+    def hop(self):
+        """Longest map walk to try, in map units: short at first, longer as walks keep arriving."""
+        w = self.walks
+        return float(np.clip(config.MAP_HOP + config.MAP_HOP_GROW * w["ok"] - config.MAP_HOP_SHRINK * w["fail"],
+                             config.MAP_HOP, config.MAP_HOP_MAX))
+
+    def walked(self, ok):
+        self.walks = dict(self.walks, **{"ok" if ok else "fail": self.walks["ok" if ok else "fail"] + 1})
+        self.save()
+
+    def outside(self):
+        """The pose is clearly on the dining side of the counter (an exit through the register gap)."""
+        return self.pose is not None and self.map.beyond_counter(self.pose[0]) > config.OUTSIDE_MARGIN * self.map.D
 
     # ---------------------------------------------------------- pose
     def update(self, img):
@@ -243,7 +291,8 @@ class Navigator:
         if r is None or r[2] > config.LOCALIZE_MAX_RMS or r[3] > config.LOCALIZE_MAX_SPREAD * self.map.D:
             return None                   # a poor fit, or labels too bunched to pin the position
         self.pose = (r[0], r[1], time.time())
-        self.visit(r[0])
+        if not self.outside():            # the roadmap is kitchen floor only
+            self.visit(r[0])
         return self.pose
 
     def turned(self, radians):

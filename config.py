@@ -130,7 +130,13 @@ HIGHLIGHT_HI = (32, 255, 255)
 
 LEARNED_FILE = "learned.json"  # roadmap of walked floor + standing spots, grows while the bot runs
 LOCALIZE_MAX_RMS = 3.0     # deg: a worse fit means misread labels, ignore the fix
-LOCALIZE_TRIES = 8         # looks (turning between them) before navigating by vision alone
+MAP_HOP = 0.4              # map units: longest map walk at first (the kitchen is ~1 across) ...
+MAP_HOP_GROW = 0.05        # ... longer by this per walk that arrived (kept in learned.json) ...
+MAP_HOP_SHRINK = 0.1       # ... shorter by this per walk that got lost
+MAP_HOP_MAX = 1.2
+COUNTER_ENDS = ("Bean Hopper", "Foam Maker")   # labels on the front counter: kitchen on one side
+OUTSIDE_MARGIN = 0.8       # camera distances D past the counter line: out in the dining room
+LOCALIZE_TRIES = 8        # looks (turning between them) before navigating by vision alone
 LOCALIZE_TURN = 0.12       # s of turn between looks: ~25 deg
 LOCALIZE_MAX_SPREAD = 0.15 # 1-sigma position error allowed from the label geometry, in camera distances D
 NODE_SPACING = 0.5         # roadmap node spacing, in units of the camera distance D

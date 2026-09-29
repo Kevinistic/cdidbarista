@@ -740,6 +740,8 @@ class Bot:
         without, only a short step back and a turn: long blind back-walks left the kitchen
         (around the counter, once into a dining chair)."""
         if self.nav and self.nav.nodes and self.localize():
+            if self.nav.outside() and self.back_inside():
+                return
             hub = max(range(len(self.nav.nodes)), key=lambda i: sum(i in e for e in self.nav.edges))
             self.say("nothing in view, back to the middle of the kitchen")
             if self.walk_to(self.nav.nodes[hub]):
@@ -826,18 +828,43 @@ class Bot:
         if goal is None:
             return False
         self.status.goal = target
-        self.say(f"map: heading to {target}")
         route = self.nav.route(goal)
-        for i, wp in enumerate(route):
+        hop = self.nav.hop()
+        from nav import cut_path                                # nav imports main: import late
+        path = cut_path(self.nav.pose[0], route, hop)          # only a short hop until walks prove reliable
+        whole = np.allclose(path[-1], route[-1])
+        self.say(f"map: heading to {target}" + ("" if whole else f" (first {hop:.2f} of the way)"))
+        for wp in path:
             nodes = [j for j, n in enumerate(self.nav.nodes) if np.allclose(n, wp)]
             here = self.nav.nearest(self.nav.pose[0])
             self.nav._target_edge = tuple(sorted((here, nodes[0]))) if nodes and here is not None else None
             if not self.walk_to(wp):
+                self.nav.walked(False)
                 self.say(f"map: lost the way to {target}, using vision")
                 return False
+        self.nav.walked(True)
         label = self.nav.map.labels.get(target)
         if label is not None:
             self.face(label)
+        return True
+
+    def back_inside(self):
+        """Two confident fixes out in the dining room: walk back in through the register gap (the
+        only way in), then to the middle of the kitchen. Labels show through walls, so vision alone
+        just walks into the counter from out there."""
+        time.sleep(0.2)
+        if not self.nav.update(self.grab()) or not self.nav.outside():
+            return False
+        gap = self.nav.spots.get("register")
+        if not gap:
+            self.say("outside the kitchen, and the register gap isn't learned yet: please walk me back in")
+            return False
+        self.say("outside the kitchen: back in through the register gap")
+        gap = min(gap, key=lambda p: np.linalg.norm(p - self.nav.pose[0]))
+        if not self.walk_to(gap, timeout=25.0):
+            return False
+        hub = max(range(len(self.nav.nodes)), key=lambda i: sum(i in e for e in self.nav.edges))
+        self.walk_to(self.nav.nodes[hub])
         return True
 
     def learn_spot(self, target):
@@ -961,6 +988,8 @@ class Bot:
         self.status.enter(step.action if step.kind == "station" else step.kind)
         if coffee.dialogue_up(self.grab()):                     # the customer is still talking
             coffee.take_order(self)
+        if self.nav and self.fails.get(step.key(), 0) >= 2 and self.localize() and self.nav.outside():
+            self.back_inside()                  # failing repeatedly: maybe out in the dining room
         drink, syrup = self.order or (None, None)
         if step.kind == "cup" and config.DEFAULT_DRINK and not coffee.complete(drink, syrup or config.DEFAULT_SYRUP):
             self.say(f"order not caught, making a {config.DEFAULT_DRINK}")

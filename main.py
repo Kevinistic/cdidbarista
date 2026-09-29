@@ -546,7 +546,6 @@ class Bot:
         self.held = set()
         self.order = None                 # (drink, syrup) of the current customer
         self.customer = None              # their name tag, remembered to find them again for serving
-        self.reasked = False              # one re-ask per customer when the order wasn't caught
         self.step = None                 # Step being worked on
         self.fails = {}                   # step key -> attempts without progress
         self.stuck_count = 0              # unstick() attempts, grows the sideways slide
@@ -905,31 +904,6 @@ class Bot:
         self.say(f"order unknown: pick the {what} yourself")
         self.release_all()
 
-    def reask(self, walk):
-        """The order wasn't caught: ask again through a text-verified 'Ask for order' chip (never a
-        blind E). Once per customer; the chip may not come back after the first ask."""
-        if self.reasked:
-            return False
-        self.reasked = True
-        self.say("order not caught, asking again")
-        if walk:
-            chip = self.goto_text(config.ASK_PROMPTS, config.COUNTER_LANDMARKS, self.customer)
-        else:                               # still facing the customer
-            chip = None
-            for _ in range(4):
-                self.check(panel_every=0)
-                target = find_prompt(self.grab(), config.ASK_PROMPTS)
-                if target is not None:
-                    chip = target.chip
-                    break
-                time.sleep(0.3)
-        if chip is None:
-            self.say("no 'Ask for order' chip to ask again")
-            return False
-        self.use(chip)
-        time.sleep(0.6)
-        return coffee.take_order(self)
-
     def do(self, step):
         self.step, self._last_check = step, time.time()
         self.status.step = str(step)
@@ -952,11 +926,11 @@ class Bot:
             if chip:
                 self.customer = self.status.customer = customer_name(self.grab(), chip)
                 self.say(f"customer: {self.customer or '?'}")
-                self.order, self.reasked, self.status.heard = None, False, ""     # a new customer
+                self.order, self.status.heard = None, ""          # a new customer
                 self.use(chip)
                 time.sleep(0.6)
-                if not coffee.take_order(self):
-                    self.reask(walk=False)
+                if not coffee.take_order(self):     # a customer can't be asked twice
+                    self.say("didn't catch the whole order")
         elif step.kind == "serve":
             self.goto_map("register")
             chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS, self.customer)
@@ -967,8 +941,6 @@ class Bot:
             if chip:
                 self.use(chip)
         elif step.kind == "cup":
-            if not drink and self.reask(walk=True):
-                drink, syrup = self.order
             if not drink:
                 return self.need_order("cup")
             chip = self.goto_station("Cup Rack", [], slow=True)
@@ -978,8 +950,6 @@ class Bot:
                 coffee.grab_cup(self, drink)
         elif step.kind == "station":
             if step.action == "Pick a Flavour" and not (syrup or config.DEFAULT_SYRUP):
-                if self.reask(walk=True):
-                    return              # back at the counter; the next pass walks to the syrup
                 return self.need_order("flavour")
             chip = self.goto_station(step.station, config.ACTIONS.get(step.action, [step.action]))
             if chip:
@@ -1001,7 +971,6 @@ class Bot:
         self.stuck_count = 0
         if step.kind == "serve":            # next customer; an order can't be re-asked, so only now
             self.order = self.customer = self.status.customer = None
-            self.reasked = False
             self.status.order, self.status.plan, self.status.heard = "-", "", ""
             s = self.status
             s.took[s.current] = time.time() - s.since

@@ -40,7 +40,7 @@ Guide for coding agents working on this repo: a Windows bot for the barista job 
 ## Checking changes offline
 - Replay saved frames through the function you changed before any live run (for example `coffee.dialogue_text`, `main.find_chips`, `main.highlighted_chip`, `nav.Map.localize`). Compare detections on a fixed frame set before and after a vision change, to catch regressions.
 - `tools/mapper.py selftest` checks the map solver and `localize` on a synthetic café.
-- There is no unit-test suite. `python -m py_compile` on the changed files is the minimum.
+- Offline regressions: `.venv\Scripts\python.exe -m unittest discover -s tools -p "selftest_*.py"` (game input is mocked). `python -m py_compile` on the changed files is the minimum.
 
 ## Conventions
 - Commits: `feat:` / `fix:` / `chore:` subject, a body that says why. **No Co-Authored-By or other attribution trailers.** Commit and push per working milestone on the current branch (`map-navigation`).

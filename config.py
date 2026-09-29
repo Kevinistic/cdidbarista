@@ -137,6 +137,7 @@ MAP_HOP_SHRINK = 0.1       # ... shorter by this per walk that got lost
 MAP_HOP_MAX = 1.2
 COUNTER_ENDS = ("Bean Hopper", "Foam Maker")   # labels on the front counter: kitchen on one side
 OUTSIDE_MARGIN = 0.8       # camera distances D past the counter line: out in the dining room
+COUNTER_BUFFER = 0.5       # D: conservative stop band, including 0.15 D localization uncertainty
 LOCALIZE_TRIES = 8        # looks (turning between them) before navigating by vision alone
 LOCALIZE_TURN = 0.12       # s of turn between looks: ~25 deg
 LOCALIZE_MAX_SPREAD = 0.15 # 1-sigma position error allowed from the label geometry, in camera distances D

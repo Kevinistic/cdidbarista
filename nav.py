@@ -151,6 +151,18 @@ class Map:
         a, out = self.counter
         return float((np.asarray(xy) - a) @ out)
 
+    def safe_motion(self, xy, yaw, key):
+        """Near the counter, allow only movement back toward the kitchen."""
+        if self.counter is None:
+            return True
+        distance = self.beyond_counter(xy)
+        if key == config.JUMP:
+            return distance < -config.COUNTER_BUFFER * self.D
+        angle = {config.FORWARD: 0, config.BACK: np.pi,
+                 config.STRAFE_LEFT: np.pi / 2, config.STRAFE_RIGHT: -np.pi / 2}[key] + yaw
+        toward_counter = np.array([math.cos(angle), math.sin(angle)]) @ self.counter[1]
+        return distance < -config.COUNTER_BUFFER * self.D or toward_counter < 0
+
     @classmethod
     def load(cls, path=config.MAP_FILE):
         import json
@@ -305,7 +317,7 @@ class Navigator:
         if r is None or r[2] > config.LOCALIZE_MAX_RMS or r[3] > config.LOCALIZE_MAX_SPREAD * self.map.D:
             return None                   # a poor fit, or labels too bunched to pin the position
         self.pose = (r[0], r[1], time.time())
-        if not self.outside():            # the roadmap is kitchen floor only
+        if self.map.beyond_counter(r[0]) <= 0:    # the roadmap is kitchen floor only
             self.visit(r[0])
         return self.pose
 
@@ -344,7 +356,7 @@ class Navigator:
     def learn(self, target, xy=None):
         """A target's chip was used from here: remember the spot (a few per target)."""
         xy = xy if xy is not None else (self.pose[0] if self.pose else None)
-        if xy is None:
+        if xy is None or self.map.beyond_counter(xy) > 0:
             return
         spots = self.spots.setdefault(target, [])
         if all(np.linalg.norm(p - xy) > 0.5 * config.NODE_SPACING * self.map.D for p in spots):

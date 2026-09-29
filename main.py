@@ -550,6 +550,10 @@ class Abort(Exception):
     """Paused, lost focus, or the panel moved on: drop the current step and re-plan."""
 
 
+class MovementBlocked(Abort):
+    """The counter guard stopped a move; verified chips may still be used."""
+
+
 @dataclass
 class Status:
     state: str = "starting"
@@ -591,6 +595,7 @@ class Bot:
         self.scr = None
         self.nav = None                   # nav.Navigator once a map.json exists (tools/mapper.py)
         self.used_at = None               # where we stood when using the last chip
+        self.used_chip = False            # only learn after this attempt actually used a chip
         try:
             import nav
             cafe = nav.Map.load()
@@ -638,9 +643,27 @@ class Bot:
             self.release(key)
 
     def tap(self, key, seconds=0.05):
-        self.hold(key)
-        time.sleep(seconds)
-        self.release(key)
+        moving = key in (config.FORWARD, config.BACK, config.STRAFE_LEFT, config.STRAFE_RIGHT, config.JUMP)
+        left = seconds
+        while left > 0:
+            if moving and self.nav and self.nav.map.counter is not None:
+                self.release_all()
+                self.check()
+                if not self.nav.update(self.grab()):
+                    raise MovementBlocked("no position fix: movement stopped at the counter guard")
+                self.check()
+                if self.nav.outside():
+                    self.enabled.clear()
+                    raise Abort("outside the kitchen: walk me back inside, then press F6")
+                if not self.nav.map.safe_motion(*self.nav.pose[:2], key):
+                    raise MovementBlocked("counter ahead: movement stopped")
+            duration = min(left, config.WALK_BURST) if moving else left
+            try:
+                self.hold(key)
+                time.sleep(duration)
+            finally:
+                self.release(key)
+            left -= duration
 
     def grab(self):
         return self.scr.grab()
@@ -789,11 +812,11 @@ class Bot:
         self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
 
     # ---------------------------------------------------------- map navigation
-    def localize(self):
+    def localize(self, panel_every=2.5):
         """Pose from the labels in view. Beside a station or at the register only 1-2 labels show,
         so turn ~25 deg at a time (most of a turn) until enough come into view."""
         for _ in range(config.LOCALIZE_TRIES):
-            self.check()
+            self.check(panel_every=panel_every)
             if self.nav.update(self.grab()):
                 return True
             self.tap(config.TURN_RIGHT, config.LOCALIZE_TURN)
@@ -815,8 +838,7 @@ class Bot:
             self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
 
     def walk_to(self, xy, timeout=12.0):
-        """Walk to map point xy holding W, steering between fixes (~0.6 s each); stop to turn
-        only when far off. Walking in short bursts between fixes barely moved the character."""
+        """Walk in bounded bursts; release W before any OCR or localization work."""
         D = self.nav.map.D
         t0, last, still, best, misses = time.time(), None, 0, float("inf"), 0
         try:
@@ -834,11 +856,11 @@ class Bot:
                     self.release(config.FORWARD)
                     self.face(xy)
                     continue
-                self.hold(config.FORWARD)
                 if abs(err) > config.FACE_TOL:
                     pulses = min(config.MAX_PULSES, max(1, round(abs(err) / config.TURN_PULSE_RAD)))
                     self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
                     self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
+                self.tap(config.FORWARD, config.WALK_BURST)
                 if not self.nav.update(self.grab()):
                     self.release(config.FORWARD)          # never walk blind: r24 walked out of the kitchen
                     misses += 1
@@ -858,8 +880,17 @@ class Bot:
             self.release(config.FORWARD)
 
     def goto_map(self, target):
+        try:
+            return self._goto_map(target)
+        except MovementBlocked as e:
+            self.say(f"map: {e}; looking for a chip")
+            return False
+
+    def _goto_map(self, target):
         """Walk along known floor to where target was used before (or the floor nearest its label),
         then face its label. The vision step after this finds and checks the chip as always."""
+        if self.nav and target not in self.nav.spots and target not in self.nav.map.labels:
+            return False
         if not self.nav or not self.localize():
             return False
         goal = self.nav.goal(target)
@@ -907,15 +938,23 @@ class Bot:
 
     def learn_spot(self, target):
         """The last chip worked: remember where we stood for target."""
-        if self.nav and self.used_at is not None:
+        try:
+            if not self.nav or not self.used_chip:
+                return
+            if self.used_at is None:
+                self.release_all()
+                self.say(f"map: finding the successful {target} spot")
+                if not self.localize(panel_every=0):
+                    return
+                self.used_at = self.nav.pose[0].copy()
             self.nav.learn(target, self.used_at)
-        self.used_at = None
+        finally:
+            self.used_at, self.used_chip = None, False
 
     def goto_station(self, name, phrases, slow=False):
         """slow: usually found by text, not a chevron (cup rack, bin), so scan in OCR-sized steps."""
         names, prompts = station_info(name)
         phrases = list(phrases) + prompts
-        self.goto_map(name)
 
         def own_chip(img):
             """The chip under the highlighted target label; else this station's prompt anywhere on
@@ -939,13 +978,22 @@ class Bot:
             label = find_station_label(img, names)
             return (find_chip(img, label, phrases) if label else None) or own_chip(img)
 
+        chip = self.settled(own_chip(self.grab()), recheck)
+        if chip is not None:
+            return chip
+        self.goto_map(name)
         return self.settled(self.navigate(locate, chip_near, slow=slow), recheck)
 
-    def goto_text(self, prompts, landmarks, customer=None):
+    def goto_text(self, prompts, landmarks, customer=None, map_target=None):
         def recheck(img):
             target = find_prompt(img, prompts)
             return target.chip if target else None
 
+        chip = self.settled(recheck(self.grab()), recheck)
+        if chip is not None:
+            return chip
+        if map_target:
+            self.goto_map(map_target)
         return self.settled(self._goto_text(prompts, landmarks, customer), recheck)
 
     def settled(self, chip, recheck):
@@ -997,14 +1045,16 @@ class Bot:
         return self.approach(target, locate, chip_near, slow)
 
     def use(self, chip):
+        self.used_at, self.used_chip = None, False
         if self.nav:
-            self.used_at = self.nav.pose[0] if self.nav.update(self.grab()) else None
+            self.used_at = self.nav.pose[0].copy() if self.nav.update(self.grab()) else None
         press = config.PRESS_E and chip.key == "e"
         self.say(f"using {chip.text!r} ({'E' if press else 'click'})")
         if press:
             self.tap(config.INTERACT, config.INTERACT_HOLD)     # the E chip under our target is ours
         else:
             self.click_client(chip.x, chip.y, config.INTERACT_HOLD)     # "Click" chips aren't the nearest prompt, E would miss them
+        self.used_chip = True
 
     # ---------------------------------------------------------- one step
     def wait_for_change(self, step, timeout=config.ACTION_WAIT):
@@ -1015,6 +1065,8 @@ class Bot:
                 coffee.pull_shot(self)
             new = parse_panel(panel_text(self.grab()))
             if new is not None and new.key() != step.key():
+                if new.kind == "bin":
+                    self.used_at, self.used_chip = None, False
                 return True
             time.sleep(0.3)
         return False
@@ -1025,6 +1077,7 @@ class Bot:
         self.release_all()
 
     def do(self, step):
+        self.used_at, self.used_chip = None, False
         self.step, self._last_check = step, time.time()
         self.status.step = str(step)
         self.status.enter(step.action if step.kind == "station" else step.kind)
@@ -1047,8 +1100,7 @@ class Bot:
             return
 
         if step.kind == "ask":
-            self.goto_map("register")
-            chip = self.goto_text(config.ASK_PROMPTS, config.COUNTER_LANDMARKS)
+            chip = self.goto_text(config.ASK_PROMPTS, config.COUNTER_LANDMARKS, map_target="register")
             if chip:
                 self.customer = self.status.customer = customer_name(self.grab(), chip)
                 self.say(f"customer: {self.customer or '?'}")
@@ -1058,8 +1110,7 @@ class Bot:
                 if not coffee.take_order(self):     # a customer can't be asked twice
                     self.say("didn't catch the whole order")
         elif step.kind == "serve":
-            self.goto_map("register")
-            chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS, self.customer)
+            chip = self.goto_text(config.SERVE_PROMPTS, config.COUNTER_LANDMARKS, self.customer, "register")
             if chip:
                 self.use(chip)
         elif step.kind == "bin":

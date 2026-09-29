@@ -260,8 +260,9 @@ def find_chips(img):
     """Every prompt chip on screen ('E' / 'Click' white box + action text to its right)."""
     H, W = img.shape[:2]
     wm = world_mask(W, H)
-    boxes = [b for b in white_boxes(img, region_box(config.WORLD_REGION, W, H), (18, 110), (20, 42), 0.7)
+    boxes = [b for b in white_boxes(img, region_box(config.WORLD_REGION, W, H), (18, 110), (20, 42), 0.6)
              if wm[(b[1] + b[3]) // 2, (b[0] + b[2]) // 2]]
+    all_boxes = white_boxes(img, region_box(config.WORLD_REGION, W, H), (8, 110), (10, 42), 0.3)   # incl. letters
     chips = []
     for x0, y0, x1, y1 in boxes:
         inner = cv2.cvtColor(img[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
@@ -271,9 +272,14 @@ def find_chips(img):
                                 inner[int(.15 * h):int(.85 * h), int(.88 * w):int(.95 * w) + 1]], axis=1)
         if not 0.03 <= np.mean(inner < 100) <= 0.4 or np.mean(edges >= 245) < 0.75                 or np.mean(sides >= 245) < 0.85:
             continue                # a chip is a white box with its dark key text centred (a "B" isn't)
+        if any(0.6 * h <= b[3] - b[1] <= 1.4 * h and abs(b[1] - y0) < 0.3 * h and x1 <= b[0] <= x1 + 0.6 * h
+               for b in all_boxes):
+            continue                # a same-size box right after it: a letter of a label ("B" of "Bean Hopper")
         # the action text runs right until the next chip on the same row, whose left edge is a
-        # solid white column even when it touches this text and wasn't found as its own box
-        end = min([b[0] for b in boxes if b[0] > x1 and abs(b[1] - y0) < h] + [x1 + 12 * h, W])
+        # solid white column even when it touches this text and wasn't found as its own box;
+        # a label's letters just below (r28: 24 px) are not on the row
+        end = min([b[0] for b in boxes if b[0] > x1 and abs(b[1] - y0) < 0.4 * h and b[3] - b[1] >= 0.7 * h]
+                  + [x1 + 12 * h, W])
         if end - x1 < h:
             continue                # at the screen edge: no text to check it against
         strip = cv2.inRange(img[y0 + h // 4:y1 - h // 4, x1 + h // 2:int(end)], (250, 250, 250), (255, 255, 255))
@@ -357,6 +363,38 @@ def find_chip(img, label, phrases, chips=None):
         if score > best_score:
             best, best_score = chip, score
     return best
+
+
+def highlighted_chip(img, phrases):
+    """The chip right under the highlighted (gold) label. Only the current target is highlighted,
+    so it's the right chip whatever OCR makes of its text ('Takc Bcan:'); refused only when its
+    text clearly names another station (a neighbour's chip overlapping)."""
+    gold = highlight_mask(img)
+    chevrons = find_chevrons(img, gold)
+    if len(chevrons) == 1:
+        label = chevron_target(img, chevrons[0], gold)
+    else:
+        boxes = [b for b in find_labels(img, gold) if b[3] - b[1] >= 18 * img.shape[0] / REF_H]
+        if len(boxes) != 1:
+            return None
+        label = Target(boxes[0])
+    x0, y0, x1, y1 = label.box
+    w, h = x1 - x0, y1 - y0
+    under = [c for c in find_chips(img)            # chips overlap the label text: start from its middle
+             if y0 + 0.3 * h <= c.box[1] <= y1 + 3 * h and x0 - max(0.5 * w, 3 * h) <= c.x <= x1]
+    if not under:
+        return None
+    chip = min(under, key=lambda c: abs(c.x - label.cx) + abs(c.box[1] - y1))
+    # the chip's text strip often runs into a neighbouring label ('ean Hopper'): judge by actions only
+    names = {squash(n) for st in config.STATIONS.values() for n in st["names"]}
+    actions = [p for p in other_phrases(phrases) if squash(p) not in names]
+    own = max((fuzzy_in(chip.text, p) for p in phrases), default=0.0)
+    other = max((fuzzy_in(chip.text, p) for p in actions), default=0.0)
+    if other >= 0.8 and own < 0.5:
+        if config.DEBUG:
+            print(f"[chip] under the highlight: refused {chip.text!r} (another station's)")
+        return None
+    return chip
 
 
 def find_prompt(img, prompts):
@@ -880,8 +918,11 @@ class Bot:
         self.goto_map(name)
 
         def own_chip(img):
-            """This station's prompt anywhere on screen: the Cup Rack's chip sits on the rack items,
-            well below its label, so looking only under the label walked away from it (r27)."""
+            """The chip under the highlighted target label; else this station's prompt anywhere on
+            screen (the Cup Rack isn't highlighted, and its chip sits well below its label: r27)."""
+            chip = highlighted_chip(img, phrases)
+            if chip is not None:
+                return chip
             hit = find_prompt(img, phrases)
             return hit.chip if hit else None
 
@@ -958,8 +999,9 @@ class Bot:
     def use(self, chip):
         if self.nav:
             self.used_at = self.nav.pose[0] if self.nav.update(self.grab()) else None
-        self.say(f"using {chip.text!r} ({chip.key})")
-        if config.PRESS_E and chip.key == "e":
+        press = config.PRESS_E and chip.key == "e"
+        self.say(f"using {chip.text!r} ({'E' if press else 'click'})")
+        if press:
             self.tap(config.INTERACT, config.INTERACT_HOLD)     # the E chip under our target is ours
         else:
             self.click_client(chip.x, chip.y, config.INTERACT_HOLD)     # "Click" chips aren't the nearest prompt, E would miss them

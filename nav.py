@@ -207,7 +207,10 @@ class Map:
         best = min((least_squares(res, x0, bounds=bounds, loss="soft_l1", f_scale=0.05) for x0 in starts),
                    key=lambda r: r.cost)
         rms = math.degrees(math.sqrt(np.mean((bear_res(best.x) / wts) ** 2)))
-        return best.x[:2], float(wrap(best.x[2])), rms, self.spread(best.x, bear_res)
+        spread = self.spread(best.x, bear_res)
+        if self.head_k and not head_w:
+            spread = math.hypot(spread, config.LOCALIZE_NO_HEAD_SPREAD * self.D)
+        return best.x[:2], float(wrap(best.x[2])), rms, spread
 
     def spread(self, x, bear_res, noise=math.radians(1.5)):
         """1-sigma position error of a fix from its bearing geometry alone (the pull held fixed):

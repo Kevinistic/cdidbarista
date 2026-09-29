@@ -554,6 +554,10 @@ class MovementBlocked(Abort):
     """The counter guard stopped a move; verified chips may still be used."""
 
 
+class LostFix(MovementBlocked):
+    """Stop translation until a stationary scan recovers the position."""
+
+
 @dataclass
 class Status:
     state: str = "starting"
@@ -650,7 +654,7 @@ class Bot:
                 self.release_all()
                 self.check()
                 if not self.nav.update(self.grab()):
-                    raise MovementBlocked("no position fix: movement stopped at the counter guard")
+                    raise LostFix("no position fix: movement stopped at the counter guard")
                 self.check()
                 if self.nav.outside():
                     self.enabled.clear()
@@ -812,10 +816,12 @@ class Bot:
         self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
 
     # ---------------------------------------------------------- map navigation
-    def localize(self, panel_every=2.5):
+    def localize(self, panel_every=2.5, deadline=None):
         """Pose from the labels in view. Beside a station or at the register only 1-2 labels show,
         so turn ~25 deg at a time (most of a turn) until enough come into view."""
         for _ in range(config.LOCALIZE_TRIES):
+            if deadline is not None and time.time() >= deadline:
+                break
             self.check(panel_every=panel_every)
             if self.nav.update(self.grab()):
                 return True
@@ -824,23 +830,33 @@ class Bot:
         self.say("map: no position fix, using vision")
         return False
 
-    def face(self, xy):
+    def face(self, xy, deadline=None):
         """Turn to look at map point xy: pulses of ~4.4 deg, dead-reckoned, with a fresh fix
         once close (localising costs ~0.5 s, turning without looking doesn't)."""
+        recovered = False
         for _ in range(12):
+            self.check()
+            if deadline is not None and time.time() >= deadline:
+                return False
             err = self.nav.heading_error(xy)                 # + = left
             if abs(err) < config.FACE_TOL:
-                if self.nav.update(self.grab()) and abs(self.nav.heading_error(xy)) < config.FACE_TOL:
-                    return
+                if self.nav.update(self.grab()):
+                    if abs(self.nav.heading_error(xy)) < config.FACE_TOL:
+                        return True
+                    continue
+                if recovered or not self.localize(deadline=deadline):
+                    return False
+                recovered = True
                 continue
             pulses = min(config.MAX_PULSES, max(1, round(abs(err) / config.TURN_PULSE_RAD)))
             self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
             self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
+        return False
 
     def walk_to(self, xy, timeout=12.0):
         """Walk in bounded bursts; release W before any OCR or localization work."""
         D = self.nav.map.D
-        t0, last, still, best, misses = time.time(), None, 0, float("inf"), 0
+        t0, last, still, best, recoveries = time.time(), None, 0, float("inf"), 0
         try:
             while time.time() - t0 < timeout:
                 self.check()
@@ -854,20 +870,25 @@ class Bot:
                 err = self.nav.heading_error(xy)                 # + = left
                 if abs(err) > config.WALK_TOL:
                     self.release(config.FORWARD)
-                    self.face(xy)
+                    if not self.face(xy, deadline=t0 + timeout):
+                        return False
                     continue
                 if abs(err) > config.FACE_TOL:
                     pulses = min(config.MAX_PULSES, max(1, round(abs(err) / config.TURN_PULSE_RAD)))
                     self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
                     self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
-                self.tap(config.FORWARD, config.WALK_BURST)
-                if not self.nav.update(self.grab()):
-                    self.release(config.FORWARD)          # never walk blind: r24 walked out of the kitchen
-                    misses += 1
-                    if misses >= 3:
+                try:
+                    self.tap(config.FORWARD, config.WALK_BURST)
+                    fixed = self.nav.update(self.grab())
+                except LostFix:
+                    fixed = None
+                if not fixed:
+                    self.release(config.FORWARD)
+                    self.say("map: lost fix, turning in place to recover")
+                    recoveries += 1
+                    if recoveries > config.MAP_RECOVERIES or not self.localize(deadline=t0 + timeout):
                         return False
                     continue
-                misses = 0
                 moved = 0 if last is None else np.linalg.norm(self.nav.pose[0] - last)
                 still = still + 1 if last is not None and moved < 0.05 * D else 0
                 last = self.nav.pose[0]

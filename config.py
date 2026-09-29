@@ -8,6 +8,7 @@ TURN_LEFT, TURN_RIGHT = "left", "right"
 FORWARD, BACK = "w", "s"
 STRAFE_LEFT, STRAFE_RIGHT = "a", "d"
 JUMP = "space"
+ZOOM_IN, ZOOM_OUT = "i", "o"
 INTERACT = "e"
 INTERACT_HOLD = 1.0         # s to hold E: "Take a Cup" is a hold prompt, 0.3 s and clicks didn't fire it
 PRESS_E = False             # E and click are interchangeable; a click hits the checked chip, E the nearest prompt

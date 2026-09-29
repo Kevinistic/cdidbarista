@@ -93,9 +93,10 @@ def observe(img):
     return [(n, *obs[0]) for n, obs in seen.items() if len(obs) == 1]
 
 
-# Walls pull the camera in: its distance behind the character is D * pull, with a weak prior
-# toward pull 1. Pull may exceed 1 a little, so D settles at the typical distance, not the largest.
-MIN_PULL, MAX_PULL, PULL_W = 0.1, 1.5, 0.02
+# The camera's distance behind the character is D * pull. Zooming and walls change it, and no
+# label bearing shows it, but the player's head width does (distance = head_k / width): a prior
+# of weight HEAD_W on log distance. Without a head in view, a weak prior toward pull 1.
+MIN_PULL, MAX_PULL, PULL_W, HEAD_W = 0.1, 4.0, 0.02, 0.2
 
 
 def bearing(u, v, W, H, pitch, vfov=config.CAMERA_VFOV):
@@ -132,6 +133,7 @@ class Map:
     def __init__(self, data):
         self.labels = {n: np.array(p) for n, p in data["labels"].items()}
         self.pitch, self.D = data["pitch"], data["D"]
+        self.head_k = data.get("head_k")        # camera distance * head width (fraction of W)
         self.spots = {k: np.array(v) for k, v in data.get("spots", {}).items()}
         # the front counter (its end labels) splits the kitchen from the dining room; the
         # mapping tour stood in the kitchen, which fixes which side is inside
@@ -155,9 +157,10 @@ class Map:
         import os
         return cls(json.load(open(path))) if os.path.exists(path) else None
 
-    def localize(self, obs, W, H, prev=None):
-        """Labels seen in one frame -> (character xy, heading, rms deg), or None with under 3
-        known labels. prev (xy, heading) seeds the search when the rough answer is ambiguous."""
+    def localize(self, obs, W, H, prev=None, head_w=None):
+        """Labels seen in one frame -> (character xy, heading, rms deg, spread), or None with under 3
+        known labels. prev (xy, heading) seeds the search when the rough answer is ambiguous;
+        head_w (the player's head width / W) sets how far the camera is behind the character."""
         from scipy.optimize import least_squares
         known = [(n, u, v, w) for n, u, v, w in obs if n in self.labels]
         if len(known) < 3:
@@ -172,12 +175,22 @@ class Map:
             c = x[:2] - x[3] * self.D * np.array([math.cos(x[2]), math.sin(x[2])])
             return wts * wrap(np.arctan2(L[:, 1] - c[1], L[:, 0] - c[0]) - (x[2] - b))
 
-        def res(x):
-            return np.append(bear_res(x), PULL_W * (1 - x[3]))
+        pull0 = 1.0
+        if head_w and self.head_k:                         # measured: the head's size on screen
+            pull0 = float(np.clip(self.head_k / head_w / self.D, MIN_PULL, MAX_PULL))
 
-        starts = [np.array([*(cam + self.D * np.array([math.cos(yaw), math.sin(yaw)])), yaw, 1.0])]
+            def prior(x):
+                return HEAD_W * math.log(x[3] / pull0)
+        else:
+            def prior(x):
+                return PULL_W * (1 - x[3])
+
+        def res(x):
+            return np.append(bear_res(x), prior(x))
+
+        starts = [np.array([*(cam + pull0 * self.D * np.array([math.cos(yaw), math.sin(yaw)])), yaw, pull0])]
         if prev is not None:
-            starts.append(np.array([*prev[0], prev[1], 1.0]))
+            starts.append(np.array([*prev[0], prev[1], pull0]))
         bounds = ([-np.inf, -np.inf, -np.inf, MIN_PULL], [np.inf, np.inf, np.inf, MAX_PULL])
         best = min((least_squares(res, x0, bounds=bounds, loss="soft_l1", f_scale=0.05) for x0 in starts),
                    key=lambda r: r.cost)
@@ -286,7 +299,8 @@ class Navigator:
         """Localise from one frame; also grows the roadmap. -> pose or None."""
         H, W = img.shape[:2]
         prev = (self.pose[0], self.pose[1]) if self.pose else None
-        r = self.map.localize(observe(img), W, H, prev)
+        import head
+        r = self.map.localize(observe(img), W, H, prev, head.head_width(img))
         self.last_fix = r
         if r is None or r[2] > config.LOCALIZE_MAX_RMS or r[3] > config.LOCALIZE_MAX_SPREAD * self.map.D:
             return None                   # a poor fit, or labels too bunched to pin the position

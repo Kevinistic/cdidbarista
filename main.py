@@ -502,7 +502,7 @@ class INPUT(ctypes.Structure):
 
 
 # Keys go out as scancodes; arrows need the extended flag or Roblox reads them as numpad keys.
-SCANCODES = {"w": 0x11, "a": 0x1E, "s": 0x1F, "d": 0x20, "e": 0x12, "space": 0x39,
+SCANCODES = {"w": 0x11, "a": 0x1E, "s": 0x1F, "d": 0x20, "e": 0x12, "space": 0x39, "i": 0x17, "o": 0x18,
              "up": (0x48, True), "down": (0x50, True), "left": (0x4B, True), "right": (0x4D, True)}
 
 

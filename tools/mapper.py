@@ -25,7 +25,7 @@ from scipy.sparse import lil_matrix
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config  # noqa: E402
-from nav import MAX_PULL, MIN_PULL, PULL_W, bearing, resect, wrap  # noqa: E402
+from nav import HEAD_W, MAX_PULL, MIN_PULL, PULL_W, bearing, resect, wrap  # noqa: E402
 
 VFOV = 70.0
 VERBOSE = bool(os.environ.get("VERBOSE"))
@@ -198,6 +198,14 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
     oL = [o["label"] for o in obs]
     oF = np.array([fi[o["frame"]] for o in obs])
     oS = np.array([si[o["spot"]] for o in obs])
+    # the head's width per frame measures the camera distance (zoom, walls): pull = ref / width
+    hw = {}
+    for o in obs:
+        if o.get("hw"):
+            hw[o["frame"]] = o["hw"]
+    ref = float(np.median(list(hw.values()))) if hw else None
+    pull0 = np.array([np.clip(ref / hw[f], MIN_PULL, MAX_PULL) if f in hw else 1.0 for f in frames])
+    has_head = np.array([f in hw for f in frames])
 
     y0 = 2 + 2 * nL + 2 * nS                        # frame headings, then frame pull-ins
     s0 = y0 + nF
@@ -222,7 +230,9 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
         return wts * wrap(seen - (yaw - bearing(U, V, W, H, pitch, VFOV)))
 
     def residuals(x):
-        return np.concatenate([bearing_res(x), PULL_W * (1 - x[s0:])])
+        S = x[s0:]
+        prior = np.where(has_head, HEAD_W * np.log(np.maximum(S, 1e-6) / pull0), PULL_W * (1 - S))
+        return np.concatenate([bearing_res(x), prior])
 
     sparsity = lil_matrix((len(obs) + nF, s0 + nF), dtype=int)
     for i, o in enumerate(obs):
@@ -279,7 +289,7 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
                 h = [math.atan2(Lpos[obs[k]["label"]][1] - Psp[1], Lpos[obs[k]["label"]][0] - Psp[0]) + bear[k]
                      for k in idx]
                 Yg[i] = math.atan2(np.mean(np.sin(h)), np.mean(np.cos(h)))
-        r = fit(np.concatenate([[pitch0, 0.05], Lg, Pg, wrap(Yg), np.ones(nF)]), pitch=pitch0, nfev=1500)
+        r = fit(np.concatenate([[pitch0, 0.05], Lg, Pg, wrap(Yg), pull0]), pitch=pitch0, nfev=1500)
         if VERBOSE:
             print(f"  pitch {deg:2d}: cost {r.cost:8.3f}  rms {np.degrees(np.sqrt(np.mean(bearing_res(r.x) ** 2))):6.2f} deg")
         if best is None or r.cost < best.cost:
@@ -290,12 +300,14 @@ def solve(obs, W, H, pitches=range(6, 50, 4)):
     pitch, D, L, P, Y, S = unpack(best.x)
     res = np.degrees(np.abs(bearing_res(best.x) / np.maximum(wts, 1e-9)))
     D, S = typical_distance(D, S)
+    # distance = head_k / head width: calibrated on the solved distances of frames showing the head
+    head_k = float(np.median([D * S[i] * hw[f] for f, i in fi.items() if f in hw])) if hw else None
     inl = res < OUTLIER_DEG
     pos = {a: (0.0, 0.0), b: (1.0, 0.0)}
     pos.update({n: tuple(map(float, L[i])) for n, i in li.items()})
     return {"labels": pos, "spots": {s: tuple(map(float, P[i])) for s, i in si.items()},
             "yaws": {f: float(Y[i]) for f, i in fi.items()}, "pulls": {f: float(S[i]) for f, i in fi.items()},
-            "D": float(D), "pitch": float(pitch),
+            "D": float(D), "pitch": float(pitch), "head_k": head_k,
             "rms_deg": float(np.sqrt(np.mean(res ** 2))), "inlier_rms_deg": float(np.sqrt(np.mean(res[inl] ** 2))),
             "outliers": float(1 - inl.mean()), "cost": float(best.cost), "used": len(obs), "dropped": dropped}
 
@@ -400,34 +412,38 @@ def append_obs(rows, W, H):
     return len(data["obs"])
 
 
-def panorama(bot, spot, taps=26, tap_s=0.1):
+def panorama(bot, spot, taps=26, tap_s=0.1, tag=None):
     """Turn in taps at the current spot, observing labels each frame. The camera can pin against
-    a wall and stop turning: then step back once and carry on as a new spot."""
+    a wall and stop turning: then step back once and carry on as a new spot. tag names the frames
+    (a second panorama at the same spot, e.g. zoomed out, needs its own)."""
     import cv2
+    import head
     import nav
+    tag = tag or spot
     rows, prev, stalls = [], None, 0
     for k in range(taps):
         img = bot.grab()
         H, W = img.shape[:2]
-        cv2.imwrite(os.path.join(MAP_DIR, f"{spot}_{k:02d}.png"), img)
+        cv2.imwrite(os.path.join(MAP_DIR, f"{tag}_{k:02d}.png"), img)
         if prev is not None and np.mean(np.abs(cv2.resize(img, (64, 40)).astype(int) -
                                                cv2.resize(prev, (64, 40)).astype(int))) < 2.0:
             stalls += 1
             if stalls == 2:
-                print(f"  {spot}: camera pinned, stepping back; continuing as {spot}b")
+                print(f"  {tag}: camera pinned, stepping back; continuing as {spot}b")
                 bot.tap(config.BACK, 0.2)
                 time.sleep(0.4)
-                spot += "b"
+                spot, tag = spot + "b", tag + "b"
                 stalls = 0
         else:
             stalls = 0
+            hw = head.head_width(img)
             for name, u, v, w in nav.observe(img):
-                rows.append({"frame": f"{spot}_{k:02d}", "spot": spot, "label": name, "u": u, "v": v, "w": w})
+                rows.append({"frame": f"{tag}_{k:02d}", "spot": spot, "label": name, "u": u, "v": v, "w": w, "hw": hw})
         prev = img
         bot.tap(config.TURN_RIGHT, tap_s)
         time.sleep(0.35)
     total = append_obs(rows, W, H)
-    print(f"  {spot}: {len(rows)} observations ({total} total)")
+    print(f"  {tag}: {len(rows)} observations ({total} total)")
 
 
 def live_bot():
@@ -471,9 +487,39 @@ def tour(stops=TOUR):
             print(f"-> {name}")
             if bot.navigate(locate, close_enough, slow=True) is None:
                 print(f"  couldn't reach {name}, panorama here anyway")
-            panorama(bot, f"s{i}_{name.replace(' ', '')}")
+            spot = f"s{i}_{name.replace(' ', '')}"
+            panorama(bot, spot)
+            # again zoomed out, so the map (and the head-size calibration) covers other zooms
+            out = ZOOM_OUT[i % len(ZOOM_OUT)]
+            bot.tap(config.ZOOM_OUT, out)
+            time.sleep(0.3)
+            panorama(bot, spot, tag=spot + "z")        # the same spot: the character didn't move
+            bot.tap(config.ZOOM_IN, out)
+            time.sleep(0.3)
     finally:
         bot.release_all()
+
+
+ZOOM_OUT = [0.4, 0.8, 1.2]      # s of holding O for the zoomed-out panorama, cycled over the stops
+
+
+def backfill_heads(obs):
+    """Head widths for observations recorded before panorama() stored them, from the saved frames."""
+    import cv2
+    import head
+    cache = {}
+    for o in obs:
+        if "hw" in o:
+            continue
+        f = o["frame"]
+        if f not in cache:
+            try:
+                img = cv2.imread(os.path.join(MAP_DIR, f + ".png"))
+                cache[f] = head.head_width(img) if img is not None and img.size else None
+            except cv2.error:               # a damaged frame file: no head size for it
+                cache[f] = None
+        o["hw"] = cache[f]
+    return obs
 
 
 def show(path, out):
@@ -507,7 +553,7 @@ if __name__ == "__main__":
         tour()
     elif cmd == "solve":
         data = json.load(open(sys.argv[2] if len(sys.argv) > 2 else os.path.join(MAP_DIR, "obs.json")))
-        m = solve(data["obs"], data["W"], data["H"])
+        m = solve(backfill_heads(data["obs"]), data["W"], data["H"])
         out = sys.argv[3] if len(sys.argv) > 3 else "map.json"
         json.dump(m, open(out, "w"), indent=1)
         print(f"{out}: {len(m['labels'])} labels, {len(m['spots'])} spots, rms {m['rms_deg']:.2f} deg"

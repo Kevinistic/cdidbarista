@@ -699,10 +699,17 @@ class Bot:
     def steer(self, err):
         """Fine turn pulses toward an offset (fraction of width): longer taps accelerate and overshoot."""
         turn = config.TURN_RIGHT if err > 0 else config.TURN_LEFT
-        for _ in range(max(1, min(config.MAX_PULSES, round(abs(err) / config.TURN_PULSE)))):
-            self.tap(turn, config.TURN_TAP)
-            time.sleep(0.08)
-        time.sleep(0.1)
+        for attempt in range(2):
+            before = self.thumb()
+            for _ in range(max(1, min(config.MAX_PULSES, round(abs(err) / config.TURN_PULSE)))):
+                self.tap(turn, config.TURN_TAP)
+                time.sleep(0.08)
+            time.sleep(0.1)
+            if attempt or np.mean(np.abs(self.thumb() - before)) >= 2.0:
+                return
+            # camera pinned against the counter or a wall: turns do nothing until the character moves
+            self.tap(config.BACK, 0.15)
+            time.sleep(0.1)
 
     def unstick(self):
         """Walking into a wall (labels show through walls): back off and slide sideways, a

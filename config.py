@@ -130,6 +130,7 @@ HIGHLIGHT_HI = (32, 255, 255)
 
 LEARNED_FILE = "learned.json"  # roadmap of walked floor + standing spots, grows while the bot runs
 LOCALIZE_MAX_RMS = 3.0     # deg: a worse fit means misread labels, ignore the fix
+LOCALIZE_MAX_SPREAD = 0.15 # 1-sigma position error allowed from the label geometry, in camera distances D
 NODE_SPACING = 0.5         # roadmap node spacing, in units of the camera distance D
 SPOTS_PER_TARGET = 3
 MAP_FILE = "map.json"      # tools/mapper.py output: label positions, camera pitch and distance
@@ -146,7 +147,7 @@ TURN_PULSE = 0.034         # fraction of the width one pulse moves the view (65 
 MAX_PULSES = 4             # pulses per correction before looking again
 TURN_PULSE_RAD = 0.078     # the same pulse as a heading change (65 px at a focal length of ~836 px)
 FACE_TOL = 0.2             # rad: close enough when facing a map point (a pulse is 0.078, fixes jitter ~0.05)
-WALK_TOL = 0.35            # rad: while walking, steer below this; stop and turn above it
+WALK_TOL = 0.35           # rad: while walking, steer below this; stop and turn above it
 ARRIVE = 0.35              # reached a waypoint within this many camera distances D
 FAST_SCAN_STEP = 0.1       # s per turn tap when scanning for the chevron (fast)
 APPROACH_TIMEOUT = 15.0

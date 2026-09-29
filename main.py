@@ -756,7 +756,7 @@ class Bot:
         """Walk to map point xy holding W, steering between fixes (~0.6 s each); stop to turn
         only when far off. Walking in short bursts between fixes barely moved the character."""
         D = self.nav.map.D
-        t0, last, still, best = time.time(), None, 0, float("inf")
+        t0, last, still, best, misses = time.time(), None, 0, float("inf"), 0
         try:
             while time.time() - t0 < timeout:
                 self.check()
@@ -778,7 +778,12 @@ class Bot:
                     self.steer(-math.copysign(pulses * config.TURN_PULSE, err))
                     self.nav.turned(math.copysign(pulses * config.TURN_PULSE_RAD, err))
                 if not self.nav.update(self.grab()):
+                    self.release(config.FORWARD)          # never walk blind: r24 walked out of the kitchen
+                    misses += 1
+                    if misses >= 3:
+                        return False
                     continue
+                misses = 0
                 moved = 0 if last is None else np.linalg.norm(self.nav.pose[0] - last)
                 still = still + 1 if last is not None and moved < 0.05 * D else 0
                 last = self.nav.pose[0]

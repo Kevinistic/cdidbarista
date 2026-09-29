@@ -153,7 +153,22 @@ class Map:
         best = min((least_squares(res, x0, bounds=bounds, loss="soft_l1", f_scale=0.05) for x0 in starts),
                    key=lambda r: r.cost)
         rms = math.degrees(math.sqrt(np.mean((bear_res(best.x) / wts) ** 2)))
-        return best.x[:2], float(wrap(best.x[2])), rms
+        return best.x[:2], float(wrap(best.x[2])), rms, self.spread(best.x, bear_res)
+
+    def spread(self, x, bear_res, noise=math.radians(1.5)):
+        """1-sigma position error of a fix from its bearing geometry alone (the pull held fixed):
+        labels all on one wall pin the direction but not the distance."""
+        eps, J = 1e-5, []
+        for i in range(3):
+            d = np.zeros_like(x)
+            d[i] = eps
+            J.append((bear_res(x + d) - bear_res(x - d)) / (2 * eps))
+        J = np.array(J).T
+        try:
+            cov = noise ** 2 * np.linalg.inv(J.T @ J)
+        except np.linalg.LinAlgError:
+            return float("inf")
+        return float(math.sqrt(max(np.linalg.eigvalsh(cov[:2, :2]))))
 
 
 def resect(L, dirs, steps=360):
@@ -224,8 +239,9 @@ class Navigator:
         H, W = img.shape[:2]
         prev = (self.pose[0], self.pose[1]) if self.pose else None
         r = self.map.localize(observe(img), W, H, prev)
-        if r is None or r[2] > config.LOCALIZE_MAX_RMS:
-            return None
+        self.last_fix = r
+        if r is None or r[2] > config.LOCALIZE_MAX_RMS or r[3] > config.LOCALIZE_MAX_SPREAD * self.map.D:
+            return None                   # a poor fit, or labels too bunched to pin the position
         self.pose = (r[0], r[1], time.time())
         self.visit(r[0])
         return self.pose
@@ -254,6 +270,7 @@ class Navigator:
             self.edges.discard(self._target_edge)
 
     _target_edge = None
+    last_fix = None                       # the last localize() result, used or not (debugging)
 
     def nearest(self, xy, among=None):
         idx = range(len(self.nodes)) if among is None else among

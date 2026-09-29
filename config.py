@@ -114,9 +114,12 @@ DIALOGUE_REGION = ((0.5, 0.0), (0.5, 0.825), (0.50, 0.055))   # "Hi! I'd like a 
 CONTINUE_REGION = ((0.5, 0.0), (0.5, 0.876), (0.20, 0.04))    # "click to continue" under it
 MODAL_REGION = ((0.5, 0.5), (0.5, 0.525), (0.50, 0.65))       # cup picker / flavour picker
 TRACK_REGION = ((0.0, 0.0), (0.3688, 0.8020), (0.2094, 0.0401))   # EKSTRAKSI track, 708,940 402x47
-WORLD_REGION = ((0.0, 0.0), (0.19, 0.0), (0.81, 0.90))        # where world labels can show up
+WORLD_REGION = ((0.0, 0.0), (0.0, 0.0), (1.0, 0.90))          # where world labels can show up
 TOPBAR_BLOCK = ((0.0, 0.0), (0.0, 0.0), (0.30, 0.065))       # Roblox menu buttons; labels near the top are kept
 HUD_BLOCK = ((1.0, 0.0), (1.0, 0.0), (0.17, 0.37))            # panel + clock, masked out of WORLD_REGION
+# left HUD, masked tightly: side-room labels (Carbonator, Tea Box ...) show up beside it
+HUD_BUTTONS_BLOCK = ((0.0, 0.0), (0.0, 0.365), (0.06, 0.30))  # car / bin / cart buttons
+HUD_MONEY_BLOCK = ((0.0, 0.0), (0.0, 0.665), (0.185, 0.335))  # money box + minimap
 
 CONTINUE_TEXTS = ["click to continue", "klik untuk lanjut"]
 CONTINUE_CUTOFF = 0.47

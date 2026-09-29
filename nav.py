@@ -69,11 +69,18 @@ def observe(img):
     """Station labels on screen -> [(name, cx, cy, weight)]. A label read on its own weighs 1;
     one picked out of overlapping labels weighs 0.5 (its x is estimated from the text). A name
     seen twice (a misread somewhere) is dropped."""
-    k = img.shape[0] / REF_H
+    H, W = img.shape[:2]
+    k = H / REF_H
+    world = main.world_mask(W, H)
+
+    def clipped(b):                                   # cut off by the HUD or the screen edge: centre unknown
+        cy, pad = int((b[1] + b[3]) / 2), int(4 * k)
+        return any(not 0 <= x < W or not world[cy, x] for x in (int(b[0]) - pad, int(b[2]) + pad))
+
     seen = {}
     for m in (main.highlight_mask(img), main.white_mask(img)):
         for b in main.find_labels(img, m):
-            if b[3] - b[1] < 18 * k:                  # player name tags are smaller than station labels
+            if b[3] - b[1] < 18 * k or clipped(b):   # player name tags are smaller than station labels
                 continue
             text = main.read_label(img, b, m)
             cy = (b[1] + b[3]) / 2

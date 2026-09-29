@@ -125,7 +125,7 @@ def world_mask(W, H):
     m = np.zeros((H, W), np.uint8)
     x0, y0, x1, y1 = region_box(config.WORLD_REGION, W, H)
     m[y0:y1, x0:x1] = 255
-    for block in (config.HUD_BLOCK, config.TOPBAR_BLOCK):
+    for block in (config.HUD_BLOCK, config.TOPBAR_BLOCK, config.HUD_BUTTONS_BLOCK, config.HUD_MONEY_BLOCK):
         x0, y0, x1, y1 = region_box(block, W, H)
         m[y0:y1, x0:x1] = 0
     return m

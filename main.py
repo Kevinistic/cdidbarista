@@ -729,14 +729,16 @@ class Bot:
         self.tap(config.TURN_RIGHT, random.uniform(0.2, 0.5))
 
     # ---------------------------------------------------------- map navigation
-    def localize(self, tries=4):
-        """Pose from the labels in view; turn a quarter at a time if too few are visible."""
-        for _ in range(tries):
+    def localize(self):
+        """Pose from the labels in view. Beside a station or at the register only 1-2 labels show,
+        so turn ~25 deg at a time (most of a turn) until enough come into view."""
+        for _ in range(config.LOCALIZE_TRIES):
             self.check()
             if self.nav.update(self.grab()):
                 return True
-            self.tap(config.TURN_RIGHT, config.FAST_SCAN_STEP)       # show other labels
+            self.tap(config.TURN_RIGHT, config.LOCALIZE_TURN)
             time.sleep(0.15)
+        self.say("map: no position fix, using vision")
         return False
 
     def face(self, xy):

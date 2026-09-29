@@ -852,15 +852,24 @@ class Bot:
         phrases = list(phrases) + prompts
         self.goto_map(name)
 
+        def own_chip(img):
+            """This station's prompt anywhere on screen: the Cup Rack's chip sits on the rack items,
+            well below its label, so looking only under the label walked away from it (r27)."""
+            hit = find_prompt(img, phrases)
+            return hit.chip if hit else None
+
         def locate(img, near):
+            chip = own_chip(img)
+            if chip is not None:
+                return Target(chip.box, chip.text, chip)
             return find_station_label(img, names, near)
 
         def chip_near(img, target):
-            return find_chip(img, target, phrases)
+            return find_chip(img, target, phrases) or own_chip(img)
 
         def recheck(img):
             label = find_station_label(img, names)
-            return find_chip(img, label, phrases) if label else None
+            return (find_chip(img, label, phrases) if label else None) or own_chip(img)
 
         return self.settled(self.navigate(locate, chip_near, slow=slow), recheck)
 

@@ -147,7 +147,7 @@ def region_box(region, W, H):
     y0 = pt + ph * py - bh * ay
     return int(x0), int(y0), int(x0 + bw), int(y0 + bh)
 
-def read_line(img, box, scale=2.0):
+def read_line(img, box, scale=2.0, allowlist=ALLOWLIST):
     """Recognise one line of text in box -> (text, confidence). No detector, so it's fast."""
     H, W = img.shape[:2]
     x0, y0, x1, y1 = max(0, int(box[0])), max(0, int(box[1])), min(W, int(box[2])), min(H, int(box[3]))
@@ -160,7 +160,7 @@ def read_line(img, box, scale=2.0):
         crop = cv2.resize(crop, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
     h, w = crop.shape
     res = reader().recognize(crop, horizontal_list=[[0, w, 0, h]], free_list=[],
-                             detail=1, allowlist=ALLOWLIST)
+                             detail=1, allowlist=allowlist)
     if not res:
         return "", 0.0
     return res[0][1].strip(), float(res[0][2])

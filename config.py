@@ -98,6 +98,16 @@ SERVE_PROMPTS = ["Hand over", "Serahkan"]
 COUNTER_LANDMARKS = ["Bean Hopper", "Coffee Maker", "Wadah Biji", "Mesin Kopi"]
 BIN_LANDMARKS = ["Bin", "Tong Sampah"]
 NAME_TAG_OFFSET = (180, 85)    # px @1172: chip left -> customer's name tag centre, chip top -> tag bottom
+# Grey handle + display-name pairs measured on r29 20/80/100/110/120/132/137.
+CUSTOMER_TAG_COLOR = ((0, 0, 135), (179, 40, 255))
+CUSTOMER_TAG_WIDTH, CUSTOMER_TAG_HEIGHT = (32, 260), (8, 32)
+CUSTOMER_TAG_JOIN = (8, 2)
+CUSTOMER_TAG_FILL = (0.1, 0.85)
+CUSTOMER_TAG_GAP, CUSTOMER_TAG_ALIGN = (2, 30), 25
+CUSTOMER_TAG_ASPECT, CUSTOMER_TAG_HEIGHT_RATIO = 2.0, 0.8
+CUSTOMER_TAG_LIMIT = 8
+CUSTOMER_CHIP_OFFSET = (0, 85)  # verified chip centre x / top y -> name bottom, r29 137
+CUSTOMER_CHIP_DISTANCE = 80
 DIALOGUE_WORDS =["Hi", "Halo", "like", "please", "pesan"]
 ORDER_MARKS = ["I'd like", "Aku pesan"]     # the sentence that names the order
 DIALOGUE_STILL = 1.5       # s a line must stay unchanged to count as typed out, when "click to continue" isn't read

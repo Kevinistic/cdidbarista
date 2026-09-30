@@ -24,7 +24,7 @@ import numpy as np
 
 import coffee
 import config
-from ocr import REF_H, best_alias, fuzzy_in, read_line, read_white_text, region_box, squash, white_boxes
+from ocr import ALLOWLIST, REF_H, best_alias, fuzzy_in, read_line, read_white_text, region_box, squash, white_boxes
 
 try:  # per-monitor DPI awareness so screen pixels match win32 coordinates 1:1
     ctypes.windll.shcore.SetProcessDpiAwareness(2)
@@ -412,6 +412,10 @@ def customer_name(img, chip):
     """Display name of the customer a chip belongs to: the small white name tag at the fixed
     offset from the chip where the asked customer's tag sat (other players stand close by)."""
     k = img.shape[0] / REF_H
+    paired = find_customer_label(img, near=(chip.x + config.CUSTOMER_CHIP_OFFSET[0] * k,
+                                          chip.box[1] - config.CUSTOMER_CHIP_OFFSET[1] * k))
+    if paired is not None:
+        return paired.text
     ex, ey = chip.box[0] + config.NAME_TAG_OFFSET[0] * k, chip.box[1] - config.NAME_TAG_OFFSET[1] * k
     m = white_mask(img)
     tags = [b for b in name_tags(img, m) if abs((b[0] + b[2]) / 2 - ex) + abs(b[3] - ey) < 80 * k]
@@ -432,9 +436,54 @@ def name_tags(img, m=None):
     return [b for b in find_labels(img, m) if b[3] - b[1] <= 22 * k and b[2] - b[0] <= 220 * k]
 
 
+def find_customer_label(img, customer=None, near=None):
+    """Player name above a grey @handle: a navigation cue, never an interaction target."""
+    H, W = img.shape[:2]
+    k = H / REF_H
+    mask = cv2.inRange(cv2.cvtColor(img, cv2.COLOR_BGR2HSV), *config.CUSTOMER_TAG_COLOR) & world_mask(W, H)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, tuple(max(1, round(v * k)) for v in config.CUSTOMER_TAG_JOIN))
+    blob = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    _, _, stats, _ = cv2.connectedComponentsWithStats(blob)
+    boxes = []
+    for x, y, w, h, _ in stats[1:]:
+        if not (config.CUSTOMER_TAG_WIDTH[0] * k <= w <= config.CUSTOMER_TAG_WIDTH[1] * k
+                and config.CUSTOMER_TAG_HEIGHT[0] * k <= h <= config.CUSTOMER_TAG_HEIGHT[1] * k
+                and w > config.CUSTOMER_TAG_ASPECT * h):
+            continue
+        fill = cv2.countNonZero(mask[y:y + h, x:x + w]) / (w * h)
+        if config.CUSTOMER_TAG_FILL[0] < fill < config.CUSTOMER_TAG_FILL[1]:
+            boxes.append(tuple(map(int, (x, y, x + w, y + h))))
+    pairs = []
+    for handle in boxes:
+        names = [b for b in boxes if b[3] + config.CUSTOMER_TAG_GAP[0] * k <= handle[1]
+                 <= b[3] + config.CUSTOMER_TAG_GAP[1] * k
+                 and abs((b[0] + b[2] - handle[0] - handle[2]) / 2) < config.CUSTOMER_TAG_ALIGN * k
+                 and b[3] - b[1] >= config.CUSTOMER_TAG_HEIGHT_RATIO * (handle[3] - handle[1])]
+        if names:
+            name = min(names, key=lambda b: handle[1] - b[3])
+            distance = abs((name[0] + name[2]) / 2 - near[0]) + abs(name[3] - near[1]) if near else 0
+            if near is None or distance < config.CUSTOMER_CHIP_DISTANCE * k:
+                pairs.append((distance if near else -handle[3], handle, name))
+    for _, handle, name in sorted(pairs)[:config.CUSTOMER_TAG_LIMIT]:
+        text, conf = read_line(img, (handle[0] - 3, handle[1] - 3, handle[2] + 3, handle[3] + 3),
+                               allowlist=ALLOWLIST + "@_")
+        if not text.strip().startswith("@") or len(squash(text)) < 3 or conf < config.OCR_MIN_CONF:
+            continue
+        display, conf = read_line(img, (name[0] - 3, name[1] - 3, name[2] + 3, name[3] + 3))
+        if len(squash(display)) < 2 or conf < config.OCR_MIN_CONF:
+            continue
+        if customer and fuzzy_in(display, customer) < config.MATCH_CUTOFF:
+            continue
+        return Target(name, display)
+    return None
+
+
 def find_landmark(img, landmarks, customer=None):
-    """What to walk toward when no prompt is in reach: the remembered customer's name tag,
-    else a big white station label."""
+    """Approach a customer name/handle pair first, then a remembered name or station label."""
+    if customer or any(n in config.COUNTER_LANDMARKS for n in landmarks):
+        target = find_customer_label(img, customer)
+        if target is not None:
+            return target
     if customer:
         m = white_mask(img)
         for b in name_tags(img, m)[:10]:
@@ -1042,9 +1091,11 @@ class Bot:
                 return find_landmark(img, landmarks, customer)
             return Target(near.box, near.text, stale=True)
 
-        target = self.scan(lambda img, near: find_prompt(img, prompts), slow=False)
+        people = any(p in config.ASK_PROMPTS + config.SERVE_PROMPTS for p in prompts)
+        target = self.scan(lambda img, near: find_prompt(img, prompts)
+                           or (find_customer_label(img, customer) if people else None), slow=False)
         if target is not None:
-            return target.chip
+            return target.chip or self.approach(target, locate, lambda img, t: None, slow=True)
         self.say(f"no prompt in reach, looking for {customer or landmarks[0]} (slow OCR)")
         for _ in range(8):                  # roughly a full turn in coarse steps
             self.check()

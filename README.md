@@ -23,4 +23,28 @@ py -m venv .venv
 
 F6 to toggle on/off, F7 to terminate. Keybinds changeable in config.py
 
-currently windows only
+Windows and Linux are supported.
+
+## Linux (X11 / Sober)
+
+Target: Linux Mint XFCE, X11 session, Roblox through [Sober](https://sober.vinegarhq.org/).
+Native Wayland is not supported (compositors hide window geometry/focus and block input injection).
+
+```text
+sudo apt install python3-venv python3-tk
+bash run.sh
+```
+
+* The game window is found by title/class `sober` (`GAME_WINDOW_MATCH` in config.py).
+  Check what yours reports with `xprop WM_CLASS _NET_WM_NAME` and click the game.
+* Run `.venv/bin/python selftest.py` first (add `--walk` to test key injection, `--hotkey` to test F6).
+  It saves `selftest_window.png` / `selftest_hint.png` so you can see exactly what the bot captures.
+* Keys/mouse go through the X server's XTEST extension, no root needed. If held movement keys
+  stutter (X key auto-repeat), `pip install evdev`, set `LINUX_INPUT = "uinput"` in config.py and give
+  your user write access to `/dev/uinput` (`sudo usermod -aG input $USER`, plus a udev rule).
+* If the capture is black, turn off the compositor: Settings > Window Manager Tweaks > Compositor.
+* `measurements.json` routes were recorded on Windows; re-record with `python calibrate.py`
+  (walk timing differs per machine and per client).
+* F6/F7 are grabbed globally on X11, so the game does not receive them.
+
+Windows and Linux share all game logic; OS specifics live in `backend/` (`windows.py`, `x11.py`).

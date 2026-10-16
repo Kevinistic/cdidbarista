@@ -6,7 +6,9 @@ clearly wip, for when cdid releases the brand new barista job rework
 features: auto read order, auto select cup/syrup, auto coffee minigame
 
 ## Installation
-1. Install latest python from https://www.python.org/downloads/
+1. Install Python 3.11 (MUST BE 3.11!!)
+    1. Open Windows Store, install 'Python Install Manager'
+    2. Open Commmand Prompt, type `py install 3.11`
 2. Click the green "<> Code" button above, then Download ZIP
 3. Unzip the project folder
 4. Open config.py on Notepad, set `LANG = "id"` or `LANG = "en"` depending on your in-game language.

@@ -3,15 +3,18 @@ stupid fuck machine learnig projet
 
 clearly wip, for when cdid releases the brand new barista job rework
 
+features: auto read order, auto select cup/syrup, auto coffee minigame
+
 ## Installation
-1. Click the green "<> Code" button, then Download ZIP
-2. Unzip the project folder
-3. Install Python 3.10 or newer from https://www.python.org/downloads/ if needed
+1. Install latest python from https://www.python.org/downloads/
+2. Click the green "<> Code" button above, then Download ZIP
+3. Unzip the project folder
+4. Open config.py on Notepad, set `LANG = "id"` or `LANG = "en"` depending on your in-game language.
 
 ## Usage
-Double-click `run.bat`. The first launch creates `.venv` and installs the required packages; later launches reuse it.
+Double-click `run.bat`, Do NOT double-click `main.py`.
 
-Do not double-click `main.py`, because Windows may use a different Python installation instead of the project's virtual environment.
+F6 to toggle on/off, F7 to terminate. Keybinds changeable in config.py
 
 For manual setup, open a terminal in the project folder and run:
 
@@ -20,10 +23,6 @@ py -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 .venv\Scripts\python.exe main.py
 ```
-
-F6 to toggle on/off, F7 to terminate. Keybinds changeable in config.py
-
-Set `LANG = "id"` or `LANG = "en"` in config.py to match the language the Roblox game is set to (menu names, dialogue and picker titles are read from the screen in that language).
 
 currently windows only
 

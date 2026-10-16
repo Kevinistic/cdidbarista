@@ -5,6 +5,12 @@ UI_SCALE = 2.0
 TOGGLE_KEY = "F6"
 FORCE_CLOSE_KEY = "F7"
 
+# Key pressed to close the customer's dialogue once the order has been read.
+DIALOGUE_KEY = "e"
+
+# Case-insensitive substring matched against the game window's title.
+GAME_WINDOW_TITLE = "roblox"
+
 MENU = ["Kopi Hitam", "Cappuccino", "Es Kopi Susu", "Americano", "Latte", 
             "Cokelat Panas", "Mocha", "Macchiato", "Frappuccino",
             "Teh", "Thai Tea", "Matcha", "Bubble Tea", "Soda", "Lemonade"]

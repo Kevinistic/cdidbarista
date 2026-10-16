@@ -24,3 +24,8 @@ py -m venv .venv
 F6 to toggle on/off, F7 to terminate. Keybinds changeable in config.py
 
 currently windows only
+
+## Layout
+
+* `main.py` overlay and process setup, `order.py` order/dialogue OCR, `cup.py` / `syrup.py` picker clicks (both built on `choice.py`), `coffee.py` brew minigame bot.
+* Shared helpers: `vision.py` (screen capture + frame-change gate), `textmatch.py` (fuzzy OCR matching), `winutil.py` (game window + mouse input).

@@ -1,21 +1,23 @@
-import cv2
-import numpy as np
-import mss
-import win32gui
-import ctypes
-import easyocr
 import re
-import difflib
 import time
+
+import cv2
+import easyocr
 import keyboard
+import numpy as np
 
-from config import DEBUG, MENU, SYRUPS, ORDER, FRAME_DIFF_THRESHOLD
+import textmatch
+import vision
+import winutil
+from config import DEBUG, MENU, SYRUPS, ORDER, FRAME_DIFF_THRESHOLD, DIALOGUE_KEY
 
-# dpi awareness, screen pix match win32 coordinates 1:1
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-except Exception:
-    ctypes.windll.user32.SetProcessDPIAware()
+winutil.set_dpi_aware()  # screen pixels match win32 coordinates 1:1
+
+# Overlay status tags (second argument of the on_status callback). None = running normally.
+STATUS_PAUSED = "PAUSED"
+STATUS_UNFOCUSED = "UNFOCUSED"
+STATUS_NOT_FOUND = "NOT FOUND"
+STATUS_ERROR = "ERROR"
 
 # ---------------------------------------------------------------------------
 # EasyOCR reader: create ONCE (loading the models takes a few seconds).
@@ -34,12 +36,17 @@ reader = easyocr.Reader(["id", "en"], gpu=USE_GPU)
 # Keep this state here so a warm-up is safe to call more than once.
 _ocr_warmed_up = False
 
-# Persistent mss screen-capture context — opened once, reused on every call.
-_sct = mss.mss()
-
 OCR_SCALE = 1 # upscale factor for ocr, originally 3
 ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!?,.' " # char whitelist
 MIN_CONFIDENCE = 0.2 # ignore detections below this confidence (0..1)
+
+
+def ocr_recognize_strip(gray):
+    """Text of a grayscale image that is a single line of text (skips the CRAFT detector)."""
+    h, w = gray.shape
+    parts = reader.recognize(gray, horizontal_list=[[0, w, 0, h]], free_list=[],
+                             detail=0, allowlist=ALLOWLIST)
+    return " ".join(parts)
 
 
 def warm_up_ocr():
@@ -58,89 +65,48 @@ def warm_up_ocr():
     _ocr_warmed_up = True
 
 
-def get_roblox_client_rect():
-    """Find Roblox window and return its exact INNER client viewport coordinates."""
-    def enum_windows_callback(hwnd, windows):
-        if win32gui.IsWindowVisible(hwnd):
-            title = win32gui.GetWindowText(hwnd)
-            if "roblox" in title.lower():
-                windows.append((hwnd, title))
+get_roblox_client_rect = winutil.get_game_rect
 
-    windows = []
-    win32gui.EnumWindows(enum_windows_callback, windows)
-
-    if not windows:
-        return None
-
-    hwnd, title = windows[0]
-
-    client_rect = win32gui.GetClientRect(hwnd)
-    width = client_rect[2] - client_rect[0]
-    height = client_rect[3] - client_rect[1]
-
-    left, top = win32gui.ClientToScreen(hwnd, (0, 0))
-
-    return {
-        "hwnd": hwnd,
-        "title": title,
-        "left": left,
-        "top": top,
-        "width": width,
-        "height": height,
-    }
-
-
-# shared parent (Roblox client viewport)
-PARENT_POS_X, PARENT_POS_Y   = 0.0, 0.0
-PARENT_SIZE_X, PARENT_SIZE_Y = 1.0, 1.0
-
-# dialogue text box (scale based)
-DLG_ANCHOR_X, DLG_ANCHOR_Y = 0.5, 1.0
-DLG_POS_X, DLG_POS_Y       = 0.5, 0.862
-DLG_SIZE_X, DLG_SIZE_Y     = 0.54, 0.16
-
-def _parent_rect(window):
-    pw = window["width"] * PARENT_SIZE_X
-    ph = window["height"] * PARENT_SIZE_Y
-    pl = window["left"] + window["width"] * PARENT_POS_X
-    pt = window["top"] + window["height"] * PARENT_POS_Y
-    return pl, pt, pw, ph
-
-
-def get_order_crop_region(window):
-    """Dialogue box in absolute screen coordinates."""
-    pl, pt, pw, ph = _parent_rect(window)
-    bw, bh = int(pw * DLG_SIZE_X), int(ph * DLG_SIZE_Y)
-    return {
-        "left": int(pl + pw * DLG_POS_X - bw * DLG_ANCHOR_X),
-        "top": int(pt + ph * DLG_POS_Y - bh * DLG_ANCHOR_Y),
-        "width": bw,
-        "height": bh,
-    }
-
-# "Klik untuk lanjut" prompt region (scale based)
-PROMPT_ANCHOR_X, PROMPT_ANCHOR_Y = 0.5, 0.0
-PROMPT_POS_X, PROMPT_POS_Y       = 0.5, 0.876
-PROMPT_SIZE_X, PROMPT_SIZE_Y     = 0.2, 0.04
+# Boxes are placed inside the Roblox client viewport (Roblox UI "scale" values):
+# anchor, position and size are all fractions of the window.
+# dialogue text box
+DLG_ANCHOR, DLG_POS, DLG_SIZE = (0.5, 1.0), (0.5, 0.862), (0.54, 0.16)
+# "Klik untuk lanjut" prompt strip
+PROMPT_ANCHOR, PROMPT_POS, PROMPT_SIZE = (0.5, 0.0), (0.5, 0.876), (0.2, 0.04)
 PROMPT_TEXT = "klik untuk lanjut"
 PROMPT_OCR_SCALE = 3
 PROMPT_DEBUG = DEBUG
 PROMPT_CUTOFF = 0.47
 POLL_MS = 50
 
-def _squash(s):
-    return "".join(s.lower().split())
+# Per dialogue (while the "Klik untuk lanjut" prompt stays on screen):
+READ_TRIES = 3             # OCR attempts to read the order (a miss is retried; the text may still be typing)
+READ_GAP = 0.25            # seconds between those attempts
+CLOSE_TRIES = 3            # key presses to close the dialogue; a re-press happens only if the prompt is still there
+CLOSE_GAP = 0.4            # seconds to wait for the dialogue to close before pressing again
+DIALOGUE_KEY_HOLD = 0.1    # seconds the key is held; a same-frame tap can be missed by Roblox
 
 
-def get_prompt_region(window):
-    pl, pt, pw, ph = _parent_rect(window)
-    bw, bh = int(pw * PROMPT_SIZE_X), int(ph * PROMPT_SIZE_Y)
+def _box(window, anchor, pos, size):
+    """Screen-space region of a UI box given in fractions of the client viewport."""
+    pw, ph = window["width"], window["height"]
+    bw, bh = int(pw * size[0]), int(ph * size[1])
     return {
-        "left": int(pl + pw * PROMPT_POS_X - bw * PROMPT_ANCHOR_X),
-        "top": int(pt + ph * PROMPT_POS_Y - bh * PROMPT_ANCHOR_Y),
+        "left": int(window["left"] + pw * pos[0] - bw * anchor[0]),
+        "top": int(window["top"] + ph * pos[1] - bh * anchor[1]),
         "width": bw,
         "height": bh,
     }
+
+
+def get_order_crop_region(window):
+    """Dialogue box in absolute screen coordinates."""
+    return _box(window, DLG_ANCHOR, DLG_POS, DLG_SIZE)
+
+
+def get_prompt_region(window):
+    return _box(window, PROMPT_ANCHOR, PROMPT_POS, PROMPT_SIZE)
+
 
 def extract_order(text):
     """'Halo! Aku pesan [order] ya.' -> '[order]' (falls back to raw text)."""
@@ -148,40 +114,29 @@ def extract_order(text):
     return m.group(1).strip() if m else text
 
 
-def _best_match(text, candidates, cutoff=0.7):
-    """Best fuzzy match of any candidate against same-length word windows of text."""
-    words = text.split()
-    best, best_score = None, cutoff
-    for cand in candidates:
-        n = len(cand.split())
-        for i in range(len(words) - n + 1):
-            chunk = " ".join(words[i:i + n])
-            score = difflib.SequenceMatcher(None, chunk.lower(), cand.lower()).ratio()
-            if score > best_score:
-                best, best_score = cand, score
-    return best
-
-
 def snap_order(text):
     """Snap noisy OCR text to (menu, syrup); either may be None."""
-    return _best_match(text, MENU), _best_match(text, SYRUPS)
+    return textmatch.best_match(text, MENU), textmatch.best_match(text, SYRUPS)
+
 
 def prepare_for_ocr(frame, scale=OCR_SCALE):
     """EasyOCR (CRAFT + CRNN) works best on natural, colored images, so we only
     upscale. No binarization: the dark outline around the letters is a useful
     cue for the detector, and thresholding tends to destroy it."""
+    if scale == 1:
+        return frame
     return cv2.resize(frame, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
 
 
-def read_customer_order(debug=False):
-    roblox_window = get_roblox_client_rect()
-    if roblox_window is None:
+def read_customer_order(debug=False, window=None):
+    if window is None:
+        window = get_roblox_client_rect()
+    if window is None:
         raise RuntimeError("Could not find a visible Roblox window.")
 
-    crop_region = get_order_crop_region(roblox_window)
+    crop_region = get_order_crop_region(window)
 
-    screenshot = np.array(_sct.grab(crop_region))
-    frame = cv2.cvtColor(screenshot, cv2.COLOR_BGRA2BGR)
+    frame = vision.to_bgr(vision.grab(crop_region))
     img = prepare_for_ocr(frame)
 
     if debug:
@@ -213,92 +168,142 @@ def read_customer_order(debug=False):
     raw = extract_order(order_text)
     return raw, *snap_order(raw)
 
-# Frame diff state for prompt_visible — skip OCR when the region hasn't changed.
-_prev_prompt_gray = None
+
+def _prompt_strip_score(shot):
+    """Similarity (0..1) of the prompt strip's text to PROMPT_TEXT."""
+    img = prepare_for_ocr(vision.to_bgr(shot), scale=PROMPT_OCR_SCALE)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return textmatch.ratio(ocr_recognize_strip(gray), PROMPT_TEXT)
+
+
+# Frame-diff state for prompt_visible: skip OCR when the strip hasn't changed.
+_prompt_gate = vision.FrameGate((32, 8), FRAME_DIFF_THRESHOLD)
 _prompt_cached_result = False
 
 
 def prompt_visible(window):
-    global _prev_prompt_gray, _prompt_cached_result
-    shot = np.array(_sct.grab(get_prompt_region(window)))
+    global _prompt_cached_result
+    shot = vision.grab(get_prompt_region(window))
+    # If the strip is pixel-stable we can reuse the last OCR decision for free.
+    if _prompt_gate.unchanged(shot):
+        return _prompt_cached_result
 
-    # Frame diff guard: downsample to a tiny thumbnail and compare with previous frame.
-    # If the region is pixel-stable we can reuse the last OCR decision for free.
-    small = cv2.resize(shot[:, :, :3], (32, 8), interpolation=cv2.INTER_AREA)
-    gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-    if _prev_prompt_gray is not None:
-        diff = float(np.mean(np.abs(gray_small.astype(np.float32) - _prev_prompt_gray.astype(np.float32))))
-        if diff < FRAME_DIFF_THRESHOLD:
-            return _prompt_cached_result
-    _prev_prompt_gray = gray_small
-
-    img = prepare_for_ocr(cv2.cvtColor(shot, cv2.COLOR_BGRA2BGR), scale=PROMPT_OCR_SCALE)
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    h, w = gray.shape
-    # skip the CRAFT detector: treat the whole strip as one text line
-    parts = reader.recognize(gray, horizontal_list=[[0, w, 0, h]], free_list=[],
-                             detail=0, allowlist=ALLOWLIST)
-    text = " ".join(parts)
-    score = difflib.SequenceMatcher(None, _squash(text), _squash(PROMPT_TEXT)).ratio()
+    score = _prompt_strip_score(shot)
     if PROMPT_DEBUG:
         print(f"[prompt score] {score:.2f}")
     _prompt_cached_result = score >= PROMPT_CUTOFF
     return _prompt_cached_result
 
 
-def main(on_tick=None, enabled_event=None, on_status=None, schedule=None):
-    was_visible = [False]
-    last_shown = ["-"]
+class _Poller:
+    """Polls Roblox every POLL_MS and handles each customer dialogue.
 
-    def set_status(text, background):
-        if on_status:
-            on_status(text, background)
+    While the prompt is on screen: read the order (retrying a miss), then press DIALOGUE_KEY to close
+    the dialogue, and press again only if the prompt is still there after CLOSE_GAP. The prompt
+    staying visible is the verification, so nothing is pressed once the dialogue is gone.
+    """
 
-    def poll():
+    def __init__(self, on_tick, enabled_event, on_status, schedule):
+        self.on_tick = on_tick
+        self.enabled_event = enabled_event
+        self.on_status = on_status
+        self.schedule = schedule
+        self.was_visible = False
+        self.last_shown = "-"
+        self._reset_dialogue()
+
+    def _reset_dialogue(self):
+        self.read_tries = 0
+        self.order_found = False
+        self.close_presses = 0
+        self.next_action = 0.0
+
+    def _status(self, text, tag=None):
+        if self.on_status:
+            self.on_status(text, tag)
+
+    def _read_order(self, window):
+        """One OCR pass; publishes the result to ORDER. True if a drink or syrup was recognised."""
+        raw, menu, syrup = read_customer_order(window=window)
+        ORDER.update(menu=menu, syrup=syrup)
+        shown = " ".join(p for p in (menu, syrup) if p) or raw
+        self.last_shown = shown
+        self._status(f"Order: {shown}")
+        if DEBUG:
+            print(shown)
+        return bool(menu or syrup)
+
+    @staticmethod
+    def _press_dialogue_key():
+        try:
+            keyboard.press(DIALOGUE_KEY)
+            time.sleep(DIALOGUE_KEY_HOLD)
+        except Exception:
+            pass
+        finally:
+            try:
+                keyboard.release(DIALOGUE_KEY)
+            except Exception:
+                pass
+
+    def _drive_dialogue(self, window):
+        """Called every poll while the prompt is visible."""
+        if time.perf_counter() < self.next_action:
+            return
+        if not self.order_found:
+            if self.read_tries >= READ_TRIES:
+                return
+            self.read_tries += 1
+            self.order_found = self._read_order(window)
+            if not self.order_found:
+                self.next_action = time.perf_counter() + READ_GAP
+                return
+        elif self.close_presses >= CLOSE_TRIES:
+            return
+        self._press_dialogue_key()
+        self.close_presses += 1
+        self.next_action = time.perf_counter() + CLOSE_GAP
+
+    def _poll_once(self):
+        if self.enabled_event is not None and not self.enabled_event.is_set():
+            self._status(f"Order: {self.last_shown}", STATUS_PAUSED)
+            self.was_visible = False
+            return
+        window = get_roblox_client_rect()
+        if window is None:
+            self._status(f"Order: {self.last_shown}", STATUS_NOT_FOUND)
+            self.was_visible = False
+        elif winutil.foreground_window() != window["hwnd"]:
+            self._status(f"Order: {self.last_shown}", STATUS_UNFOCUSED)
+            self.was_visible = False
+        else:
+            self._status(f"Order: {self.last_shown}")
+            visible = prompt_visible(window)
+            if visible:
+                if not self.was_visible:  # rising edge: a new dialogue
+                    self._reset_dialogue()
+                self._drive_dialogue(window)
+            self.was_visible = visible
+            if self.on_tick:
+                self.on_tick(window)
+
+    def poll(self):
         t0 = time.perf_counter()
         try:
-            is_enabled = enabled_event.is_set() if enabled_event is not None else True
-            if not is_enabled:
-                set_status(f"Order: {last_shown[0]} [PAUSED]", "#552222")
-                was_visible[0] = False
-            else:
-                window = get_roblox_client_rect()
-                fg_hwnd = win32gui.GetForegroundWindow()
-
-                if window is not None and fg_hwnd != window["hwnd"]:
-                    set_status(f"Order: {last_shown[0]} [UNFOCUSED]", "#552222")
-                    was_visible[0] = False
-                elif window is not None:
-                    set_status(f"Order: {last_shown[0]}", "#225522")
-                    visible = prompt_visible(window)
-                    if visible and not was_visible[0]:  # rising edge only
-                        raw, menu, syrup = read_customer_order()
-                        if menu or syrup:
-                            try:
-                                keyboard.send("space")
-                            except Exception:
-                                pass
-                        ORDER.update(menu=menu, syrup=syrup)
-                        shown = " ".join(p for p in (menu, syrup) if p) or raw
-                        last_shown[0] = shown
-                        set_status(f"Order: {shown}", "#225522")
-                        if DEBUG:
-                            print(shown)
-                    was_visible[0] = visible
-                    if on_tick:
-                        on_tick(window)
-                else:
-                    set_status(f"Order: {last_shown[0]} [NOT FOUND]", "#552222")
-                    was_visible[0] = False
+            self._poll_once()
         except Exception as e:
-            set_status(f"error: {e}", "#552222")
+            self._status(f"error: {e}", STATUS_ERROR)
         elapsed_ms = (time.perf_counter() - t0) * 1000
-        if schedule:
-            schedule(max(1, int(POLL_MS - elapsed_ms)), poll)
+        if self.schedule:
+            self.schedule(max(1, int(POLL_MS - elapsed_ms)), self.poll)
 
+
+def main(on_tick=None, enabled_event=None, on_status=None, schedule=None):
+    """Start polling. `on_status(text, tag)` gets one of the STATUS_* tags (None while running)."""
+    poller = _Poller(on_tick, enabled_event, on_status, schedule)
     if DEBUG:
         print("OCR ready.")
-    poll()
+    poller.poll()
 
 
 if __name__ == "__main__":

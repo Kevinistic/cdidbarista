@@ -1,3 +1,7 @@
 .env
 .venv
+.claude
 __pycache__
+debug_*.png
+hint_debug.png
+selftest_*.png

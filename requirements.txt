@@ -1,7 +1,7 @@
-opencv-python
-numpy
-mss
-pywin32
-keyboard
-easyocr
-torch
+opencv-python>=4.8,<6
+numpy>=1.26,<3
+mss>=9,<11
+easyocr>=1.7,<2
+torch>=2.2,<3
+pywin32>=306
+keyboard>=0.13,<1

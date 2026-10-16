@@ -21,13 +21,21 @@ if not exist ".venv\Scripts\python.exe" (
     )
 )
 
-echo Checking dependencies...
+rem Only run pip when requirements.txt changed since the last successful install.
+set "STAMP=.venv\requirements.installed.txt"
+fc /b requirements.txt "%STAMP%" >nul 2>&1
+if not errorlevel 1 goto deps_ok
+
+echo Installing dependencies...
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt
 if errorlevel 1 (
     echo Failed to install dependencies.
     pause
     exit /b 1
 )
+copy /y requirements.txt "%STAMP%" >nul
+
+:deps_ok
 
 echo Starting CDID Barista...
 ".venv\Scripts\python.exe" main.py

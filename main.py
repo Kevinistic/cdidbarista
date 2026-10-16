@@ -86,7 +86,7 @@ class Overlay:
             text=f"Terminate: {close_key}\nOrder: -",
             fill=TEXT_COLOR, font=font, justify="left", anchor="nw", width=WIDTH - 24,
         )
-        canvas.create_text(10, HEIGHT - 12, text="Made with ♥ by @aoderu and @.dar_.",
+        canvas.create_text(10, HEIGHT - 12, text="Made with ♥ by @aoderu",
                            fill=TEXT_COLOR, font=credit_font, anchor="sw")
 
         drag = {"x": 0, "y": 0}

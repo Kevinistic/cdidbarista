@@ -1,6 +1,6 @@
-"""Clicks the ordered drink on the "PESANANNYA APA?" picker (ORDER["menu"]); see choice.py."""
+"""Clicks the ordered drink on the drink picker (ORDER["menu"]); see choice.py."""
 from choice import ChoicePicker
-from config import MENU
+from config import MENU, PICK_TITLE_MENU
 
-picker = ChoicePicker("PESANANNYA APA?", "menu", MENU)
+picker = ChoicePicker(PICK_TITLE_MENU, "menu", MENU)
 tick = picker.tick

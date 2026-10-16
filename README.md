@@ -23,6 +23,8 @@ py -m venv .venv
 
 F6 to toggle on/off, F7 to terminate. Keybinds changeable in config.py
 
+Set `LANG = "id"` or `LANG = "en"` in config.py to match the language the Roblox game is set to (menu names, dialogue and picker titles are read from the screen in that language).
+
 currently windows only
 
 ## Layout

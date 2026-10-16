@@ -9,7 +9,8 @@ import numpy as np
 import textmatch
 import vision
 import winutil
-from config import DEBUG, MENU, SYRUPS, ORDER, FRAME_DIFF_THRESHOLD, DIALOGUE_KEY
+from config import (DEBUG, MENU, SYRUPS, ORDER, FRAME_DIFF_THRESHOLD, DIALOGUE_KEY,
+                    PROMPT_TEXT, ORDER_PATTERN, OCR_LANGS)
 
 winutil.set_dpi_aware()  # screen pixels match win32 coordinates 1:1
 
@@ -29,7 +30,7 @@ try:
 except Exception:
     USE_GPU = False
 
-reader = easyocr.Reader(["id", "en"], gpu=USE_GPU)
+reader = easyocr.Reader(OCR_LANGS, gpu=USE_GPU)
 
 # Reader construction loads the model files, but EasyOCR still performs some
 # lazy setup on its first inference (notably CUDA initialization when enabled).
@@ -71,15 +72,14 @@ get_roblox_client_rect = winutil.get_game_rect
 # anchor, position and size are all fractions of the window.
 # dialogue text box
 DLG_ANCHOR, DLG_POS, DLG_SIZE = (0.5, 1.0), (0.5, 0.862), (0.54, 0.16)
-# "Klik untuk lanjut" prompt strip
+# "click to continue" prompt strip (text from config.PROMPT_TEXT)
 PROMPT_ANCHOR, PROMPT_POS, PROMPT_SIZE = (0.5, 0.0), (0.5, 0.876), (0.2, 0.04)
-PROMPT_TEXT = "klik untuk lanjut"
 PROMPT_OCR_SCALE = 3
 PROMPT_DEBUG = DEBUG
 PROMPT_CUTOFF = 0.47
 POLL_MS = 50
 
-# Per dialogue (while the "Klik untuk lanjut" prompt stays on screen):
+# Per dialogue (while the "click to continue" prompt stays on screen):
 READ_TRIES = 3             # OCR attempts to read the order (a miss is retried; the text may still be typing)
 READ_GAP = 0.25            # seconds between those attempts
 CLOSE_TRIES = 3            # key presses to close the dialogue; a re-press happens only if the prompt is still there
@@ -109,8 +109,8 @@ def get_prompt_region(window):
 
 
 def extract_order(text):
-    """'Halo! Aku pesan [order] ya.' -> '[order]' (falls back to raw text)."""
-    m = re.search(r"pesan\s+(.+?)\s+ya\b", text, re.IGNORECASE)
+    """'Halo! Aku pesan [order] ya.' -> '[order]' (falls back to raw text); pattern depends on config.LANG."""
+    m = re.search(ORDER_PATTERN, text, re.IGNORECASE)
     return m.group(1).strip() if m else text
 
 

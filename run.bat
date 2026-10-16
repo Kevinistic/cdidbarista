@@ -53,6 +53,14 @@ copy /y requirements.txt "%STAMP%" >nul
 
 :deps_ok
 
+rem Match UI_SCALE in config.py to the Windows display scaling (96 DPI = 100%).
+set "DPI=96"
+for /f "tokens=3" %%A in ('reg query "HKCU\Control Panel\Desktop\WindowMetrics" /v AppliedDPI 2^>nul ^| find "AppliedDPI"') do set /a DPI=%%A
+if "%DPI%"=="96" (
+    for /f "tokens=3" %%A in ('reg query "HKCU\Control Panel\Desktop" /v LogPixels 2^>nul ^| find "LogPixels"') do set /a DPI=%%A
+)
+powershell -NoProfile -Command "$s=[math]::Round([int]$env:DPI/96,2).ToString([cultureinfo]::InvariantCulture); $p=Join-Path (Get-Location) 'config.py'; $t=[IO.File]::ReadAllText($p); [IO.File]::WriteAllText($p, [regex]::Replace($t,'(?m)^UI_SCALE = [^\r\n]*','UI_SCALE = '+$s))"
+
 echo Starting CDID Barista...
 ".venv\Scripts\python.exe" main.py
 if errorlevel 1 (
